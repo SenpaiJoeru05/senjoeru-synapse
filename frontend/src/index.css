@@ -1,0 +1,62 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-background text-white antialiased;
+  }
+}
+
+@layer utilities {
+  .glass {
+    background: linear-gradient(135deg, rgba(255, 255, 255, 0.05) 0%, rgba(255, 255, 255, 0.02) 100%);
+    backdrop-filter: blur(12px);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+  }
+  
+  .glass-card {
+    @apply rounded-2xl p-6;
+    background: linear-gradient(135deg, rgba(255, 255, 255, 0.05) 0%, rgba(255, 255, 255, 0.02) 100%);
+    backdrop-filter: blur(12px);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+  }
+  
+  .neon-glow {
+    box-shadow: 0 0 10px rgba(99, 102, 241, 0.5),
+                0 0 20px rgba(139, 92, 246, 0.3),
+                0 0 30px rgba(6, 182, 212, 0.2);
+  }
+  
+  .neon-text {
+    text-shadow: 0 0 10px rgba(99, 102, 241, 0.8),
+                 0 0 20px rgba(139, 92, 246, 0.6);
+  }
+  
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none;
+  }
+  
+  .scrollbar-hide {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-surface;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-surface2 rounded-full;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-primary/50;
+}

@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.env
+.DS_Store
+*.log
+frontend/dist/
+backend/.env
+collectors/.env
+metrics/*.json
+!metrics/.gitkeep

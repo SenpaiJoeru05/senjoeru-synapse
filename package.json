@@ -1,0 +1,48 @@
+{
+  "name": "senjoeru-synapse",
+  "version": "1.0.0",
+  "description": "The Neural Network of Your AI Team - AI Agent Operations Center",
+  "main": "electron/main.js",
+  "scripts": {
+    "dev": "concurrently \"npm run dev:frontend\" \"npm run dev:backend\" \"npm run dev:collector\" \"npm run dev:electron\"",
+    "dev:web": "concurrently \"npm run dev:frontend\" \"npm run dev:backend\" \"npm run dev:collector\"",
+    "dev:frontend": "cd frontend && npm run dev",
+    "dev:backend": "cd backend && npm run dev",
+    "dev:collector": "cd collectors && node index.js",
+    "dev:electron": "wait-on http://localhost:5173 && electron .",
+    "build": "npm run build:frontend",
+    "build:frontend": "cd frontend && npm run build",
+    "build:electron": "electron-builder",
+    "postinstall": "cd frontend && npm install && cd ../backend && npm install && cd ../collectors && npm install"
+  },
+  "keywords": [
+    "ai",
+    "agents",
+    "monitoring",
+    "dashboard",
+    "electron"
+  ],
+  "author": "SenJoeru",
+  "license": "MIT",
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "electron": "^28.0.0",
+    "electron-builder": "^24.9.1",
+    "wait-on": "^7.2.0"
+  },
+  "build": {
+    "appId": "com.senjoeru.synapse",
+    "productName": "SenJoeru Synapse",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "electron/**/*",
+      "frontend/dist/**/*",
+      "backend/**/*",
+      "collectors/**/*",
+      "metrics/**/*",
+      "shared/**/*"
+    ]
+  }
+}

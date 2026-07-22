@@ -1,0 +1,9 @@
+{
+  "name": "electron",
+  "version": "1.0.0",
+  "description": "Electron main process for SenJoeru Synapse",
+  "main": "main.js",
+  "dependencies": {
+    "electron-is-dev": "^2.0.0"
+  }
+}

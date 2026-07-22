@@ -1,0 +1,22 @@
+{
+  "name": "backend",
+  "version": "1.0.0",
+  "description": "Express backend for SenJoeru Synapse",
+  "main": "server.js",
+  "scripts": {
+    "dev": "nodemon server.js",
+    "start": "node server.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "chokidar": "^3.5.3",
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "fs-extra": "^11.2.0",
+    "node-cron": "^3.0.3",
+    "ws": "^8.21.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  }
+}
