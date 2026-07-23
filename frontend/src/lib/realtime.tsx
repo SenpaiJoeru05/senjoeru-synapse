@@ -29,6 +29,8 @@ const BACKOFF_MAX = 10_000
 export interface RealtimeState {
   metrics: any | null
   health: any | null
+  /** SQLite-backed live data: { tasks, execution } — permanent store, not cache. */
+  db: any | null
   connected: boolean
   ready: boolean
   /** Force an immediate REST re-fetch (e.g. a manual "refresh" button). */
@@ -36,7 +38,7 @@ export interface RealtimeState {
 }
 
 const RealtimeContext = createContext<RealtimeState>({
-  metrics: null, health: null, connected: false, ready: false, refresh: () => {},
+  metrics: null, health: null, db: null, connected: false, ready: false, refresh: () => {},
 })
 
 export function useRealtime(): RealtimeState {
@@ -49,9 +51,30 @@ export function useMetric(key: string): any {
   return metrics?.[key] ?? {}
 }
 
+/**
+ * Authoritative task list for the dashboard.
+ *
+ * SQLite (the `db:update` frame) is the source of truth — Step 10 of the
+ * Phase-1 migration. Only current board tasks are returned (removed tasks are
+ * flagged present_in_board=0 and live on in the History view). Falls back to the
+ * runtime metrics JSON only when the SQLite frame is unavailable (DB down), so
+ * there is never a regression. Normalizes `taskLastUpdated` → `lastUpdated` so
+ * consumers written against the old shape keep working unchanged.
+ */
+export function useTasks(): any[] {
+  const { db, metrics } = useRealtime()
+  if (Array.isArray(db?.tasks)) {
+    return db.tasks
+      .filter((t: any) => t.presentInBoard !== false)
+      .map((t: any) => ({ ...t, lastUpdated: t.lastUpdated ?? t.taskLastUpdated ?? t.updatedAt }))
+  }
+  return metrics?.tasks?.tasks ?? []
+}
+
 export function RealtimeProvider({ children }: { children: ReactNode }) {
   const [metrics, setMetrics] = useState<any | null>(null)
   const [health, setHealth] = useState<any | null>(null)
+  const [db, setDb] = useState<any | null>(null)
   const [connected, setConnected] = useState(false)
   const [ready, setReady] = useState(false)
 
@@ -110,6 +133,7 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
         try {
           const payload = JSON.parse(evt.data)
           if (payload?.type === 'metrics:update') applyMetricsFrame(payload)
+          else if (payload?.type === 'db:update') setDb(payload)
         } catch {
           /* ignore malformed / non-metrics frame */
         }
@@ -140,7 +164,7 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
   }, [])
 
   return (
-    <RealtimeContext.Provider value={{ metrics, health, connected, ready, refresh }}>
+    <RealtimeContext.Provider value={{ metrics, health, db, connected, ready, refresh }}>
       {children}
     </RealtimeContext.Provider>
   )

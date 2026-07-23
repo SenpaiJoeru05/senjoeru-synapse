@@ -8,6 +8,7 @@ import Analytics from './pages/Analytics'
 import Git from './pages/Git'
 import Testing from './pages/Testing'
 import Activity from './pages/Activity'
+import History from './pages/History'
 import AgentNetwork from './pages/AgentNetwork'
 import Settings from './pages/Settings'
 
@@ -24,6 +25,7 @@ function App() {
             <Route path="git" element={<Git />} />
             <Route path="testing" element={<Testing />} />
             <Route path="activity" element={<Activity />} />
+            <Route path="history" element={<History />} />
             <Route path="network" element={<AgentNetwork />} />
             <Route path="settings" element={<Settings />} />
           </Route>

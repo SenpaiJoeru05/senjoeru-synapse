@@ -8,3 +8,9 @@ backend/.env
 collectors/.env
 metrics/*.json
 !metrics/.gitkeep
+
+# SQLite application database (permanent local data — never committed)
+backend/data/
+*.db
+*.db-wal
+*.db-shm

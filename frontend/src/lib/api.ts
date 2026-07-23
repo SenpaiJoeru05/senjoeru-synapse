@@ -58,5 +58,21 @@ export const api = {
   async getAgentNetwork(): Promise<any> {
     const response = await axios.get(`${API_BASE_URL}/agent-network`)
     return response.data
-  }
+  },
+
+  // ── SQLite-backed (permanent) data ──────────────────────────────────────
+  async getDbTasks(): Promise<any> {
+    const response = await axios.get(`${API_BASE_URL}/tasks`)
+    return response.data
+  },
+
+  async getTaskHistory(id: string): Promise<any> {
+    const response = await axios.get(`${API_BASE_URL}/tasks/${encodeURIComponent(id)}/history`)
+    return response.data
+  },
+
+  async getExecutionHistory(limit = 50): Promise<any> {
+    const response = await axios.get(`${API_BASE_URL}/execution-history?limit=${limit}`)
+    return response.data
+  },
 }
