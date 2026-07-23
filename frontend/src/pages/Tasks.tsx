@@ -4,7 +4,7 @@ import {
   Clock, AlertTriangle, CheckCircle2, Circle, GitBranch,
   ChevronDown, ChevronUp, Filter, RefreshCw
 } from 'lucide-react'
-import { useRealtime } from '@/lib/realtime'
+import { useRealtime, useTasks } from '@/lib/realtime'
 
 interface TaskRepo {
   name: string
@@ -272,12 +272,14 @@ function StatusSummary({ tasks }: { tasks: Task[] }) {
 }
 
 export default function Tasks() {
-  const { metrics, ready, refresh } = useRealtime()
+  const { db, ready, refresh } = useRealtime()
   const [repoFilter, setRepoFilter] = useState<string | null>(null)
   const [statusFilter, setStatusFilter] = useState<string | null>(null)
 
-  const rawTasks = metrics?.tasks?.tasks
-  const lastUpdated: string | null = metrics?.tasks?.lastUpdated ?? null
+  // SQLite is the source of truth for tasks (Step 10); falls back to metrics
+  // JSON inside useTasks() only if the DB frame is unavailable.
+  const rawTasks = useTasks()
+  const lastUpdated: string | null = db?.timestamp ?? null
   // Normalize statuses (task + per-repo) so any data source renders safely.
   const tasks: Task[] = useMemo(() => (rawTasks || []).map((t: Task) => ({
     ...t,

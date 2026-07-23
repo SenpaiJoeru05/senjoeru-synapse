@@ -9,7 +9,8 @@ import {
   TestTube,
   Activity,
   Settings,
-  Network
+  Network,
+  History
 } from 'lucide-react'
 
 const navItems = [
@@ -20,6 +21,7 @@ const navItems = [
   { path: 'git', label: 'Git', icon: GitBranch },
   { path: 'testing', label: 'Testing', icon: TestTube },
   { path: 'activity', label: 'Activity', icon: Activity },
+  { path: 'history', label: 'History', icon: History },
   { path: 'network', label: 'Agent Network', icon: Network },
   { path: 'settings', label: 'Settings', icon: Settings },
 ]

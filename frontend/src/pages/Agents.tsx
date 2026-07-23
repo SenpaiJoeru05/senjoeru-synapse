@@ -1,6 +1,6 @@
 import { motion } from 'framer-motion'
 import { RefreshCw, Briefcase, GitBranch, Zap } from 'lucide-react'
-import { useRealtime } from '@/lib/realtime'
+import { useRealtime, useTasks } from '@/lib/realtime'
 
 interface Agent {
   id: string
@@ -173,7 +173,7 @@ function AgentCard({ agent, agentTasks, index }: { agent: Agent; agentTasks: Tas
 export default function Agents() {
   const { metrics, ready, refresh } = useRealtime()
   const agents: Agent[] = metrics?.agents?.agents || []
-  const tasks: Task[] = metrics?.tasks?.tasks || []
+  const tasks: Task[] = useTasks() // SQLite source of truth (Step 10)
   const sessionCount: number = metrics?.sessions?.sessionCount || 0
   const loading = !ready && agents.length === 0
 

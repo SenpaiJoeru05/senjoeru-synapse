@@ -8,6 +8,26 @@ const http = require('http');
 const { WebSocketServer } = require('ws');
 const { buildLaidOutGraph } = require('./lib/graph-builder');
 const networkRouter = require('./routes/network');
+const { openDatabase } = require('./lib/db');
+const { TaskRepository } = require('./repositories/task-repository');
+const { TaskSyncService } = require('./services/task-sync-service');
+const { createTasksRouter, mapTask } = require('./routes/tasks');
+const { WorkspaceRepository } = require('./repositories/workspace-repository');
+const { ProjectRepository } = require('./repositories/project-repository');
+const { RepositoryRepository } = require('./repositories/repository-repository');
+const { SettingsRepository } = require('./repositories/settings-repository');
+const { WorkspaceService } = require('./services/workspace-service');
+const { ProjectService } = require('./services/project-service');
+const { RepositoryService } = require('./services/repository-service');
+const { SettingsService } = require('./services/settings-service');
+const {
+  createWorkspacesRouter, createProjectsRouter, createRepositoriesRouter,
+} = require('./routes/core-entities');
+const { AnalyticsRepository } = require('./repositories/analytics-repository');
+const { AnalyticsService } = require('./services/analytics-service');
+const {
+  createAnalyticsRouter, createExecutionHistoryRouter, mapExec,
+} = require('./routes/analytics');
 
 const app = express();
 const PORT = 3001;
@@ -19,6 +39,7 @@ app.use(express.json());
 // Paths
 const METRICS_DIR = path.join(__dirname, '../metrics');
 const CLAUDE_DIR = 'C:\\Users\\joelr\\.claude';
+const CLAUDE_TASKS_FILE = path.join(CLAUDE_DIR, 'tasks.json');
 
 // Ensure metrics directory exists
 fs.ensureDirSync(METRICS_DIR);
@@ -45,8 +66,96 @@ const initializeMetrics = () => {
 
 initializeMetrics();
 
+// ─── SQLite application data layer (PHASE-1) ───────────────────────────────
+// SQLite is the PERMANENT source of truth for Synapse-owned data. Tasks are
+// imported one-way from Claude's `.claude/tasks.json` (see TaskSyncService).
+// Failure here must never take down monitoring — degrade gracefully.
+let taskRepo = null;
+let taskSync = null;
+let settingsService = null;
+let workspaceService = null;
+let projectService = null;
+let repositoryService = null;
+let analyticsRepo = null;
+let analyticsService = null;
+try {
+  const db = openDatabase();
+
+  // Tasks (imported one-way from Claude's tasks.json).
+  taskRepo = new TaskRepository(db);
+  taskSync = new TaskSyncService(db, CLAUDE_TASKS_FILE);
+  const summary = taskSync.sync(); // initial import on startup
+
+  // Historical analytics + execution history.
+  analyticsRepo = new AnalyticsRepository(db);
+  analyticsService = new AnalyticsService(analyticsRepo, METRICS_DIR);
+
+  // Relational core + settings.
+  workspaceService = new WorkspaceService(new WorkspaceRepository(db));
+  projectService = new ProjectService(new ProjectRepository(db));
+  repositoryService = new RepositoryService(new RepositoryRepository(db));
+  settingsService = new SettingsService(
+    new SettingsRepository(db),
+    path.join(METRICS_DIR, 'config.json')
+  );
+
+  // Seed once: a default workspace + settings imported from config.json.
+  const ws = workspaceService.ensureDefault();
+  const seeded = settingsService.seedFromConfigIfEmpty();
+
+  // Initial history snapshot from whatever metrics already exist on disk.
+  const snap = analyticsService.snapshotAll(taskRepo);
+  console.log(
+    `[db] SQLite ready; task sync ${JSON.stringify(summary)}; ` +
+    `workspace="${ws.name}"; settings ${seeded ? 'seeded from config.json' : 'loaded'}; ` +
+    `analytics ${JSON.stringify(snap)}`
+  );
+} catch (err) {
+  console.error('[db] SQLite unavailable — persistence disabled:', err.message);
+}
+
+// Snapshot runtime metrics into permanent history. Guarded so a snapshot error
+// never breaks the collector ping or startup.
+function snapshotAnalyticsSafe(trigger) {
+  if (!analyticsService) return;
+  try {
+    const snap = analyticsService.snapshotAll(taskRepo);
+    if (snap.commitsAdded || snap.completionsAdded) {
+      console.log(`[db] analytics (${trigger}): ${JSON.stringify(snap)}`);
+    }
+  } catch (err) {
+    console.error(`[db] analytics snapshot failed (${trigger}):`, err.message);
+  }
+}
+
+// Reconcile SQLite from tasks.json. Guarded so a sync error never breaks the
+// caller (startup, the collector ping, or the manual endpoint).
+function syncTasksSafe(trigger) {
+  if (!taskSync) return;
+  try {
+    const summary = taskSync.sync();
+    if (summary && !summary.skipped && (summary.created || summary.updated)) {
+      console.log(`[db] task sync (${trigger}):`, JSON.stringify(summary));
+    }
+  } catch (err) {
+    console.error(`[db] task sync failed (${trigger}):`, err.message);
+  }
+}
+
 // Agent-network graph (initial paint) — realtime updates come over /ws
 app.use('/api/agent-network', networkRouter);
+
+// SQLite-backed views (only mounted when the DB opened successfully).
+if (taskRepo) {
+  app.use('/api/tasks', createTasksRouter(taskRepo));
+}
+if (workspaceService) app.use('/api/workspaces', createWorkspacesRouter(workspaceService));
+if (projectService) app.use('/api/projects', createProjectsRouter(projectService));
+if (repositoryService) app.use('/api/repositories', createRepositoriesRouter(repositoryService));
+if (analyticsRepo) {
+  app.use('/api/analytics', createAnalyticsRouter(analyticsRepo));
+  app.use('/api/execution-history', createExecutionHistoryRouter(analyticsRepo));
+}
 
 // API Routes
 app.get('/api/metrics/:type', async (req, res) => {
@@ -176,10 +285,13 @@ app.get('/api/system/health', async (req, res) => {
 
 app.get('/api/settings', async (req, res) => {
   try {
+    // SQLite is the source of truth when available.
+    if (settingsService) return res.json(settingsService.getAll());
+
+    // Fallback (DB unavailable): read config.json directly, as before.
     const configPath = path.join(METRICS_DIR, 'config.json');
     if (fs.existsSync(configPath)) {
-      const config = await fs.readJson(configPath);
-      res.json(config);
+      res.json(await fs.readJson(configPath));
     } else {
       res.json({
         claudeDir: CLAUDE_DIR,
@@ -197,6 +309,14 @@ app.get('/api/settings', async (req, res) => {
 
 app.post('/api/settings', async (req, res) => {
   try {
+    // Persist to SQLite (source of truth) and mirror to config.json so the
+    // collector keeps reading its operational config unchanged.
+    if (settingsService) {
+      const saved = settingsService.save(req.body || {});
+      return res.json({ success: true, settings: saved });
+    }
+
+    // Fallback (DB unavailable): write config.json directly, as before.
     const configPath = path.join(METRICS_DIR, 'config.json');
     const config = { ...req.body, lastUpdated: new Date().toISOString() };
     await fs.writeJson(configPath, config, { spaces: 2 });
@@ -267,6 +387,16 @@ const wss = new WebSocketServer({ server, path: '/ws' });
 
 let lastPayloadStr = null;  // stringified {nodes,edges,activity} of last graph broadcast
 let lastMetricsStr = null;  // stringified metrics object of last metrics broadcast
+let lastDbStr = null;       // stringified SQLite-backed payload of last db broadcast
+
+// SQLite-backed live frame: the permanent task store (current state) + the most
+// recent append-only execution events. Pushed on the same debounced cycle so
+// Mission Control sees persisted data update in real time.
+function buildDbPayload() {
+  const tasks = taskRepo ? taskRepo.getAll().map(mapTask) : [];
+  const execution = analyticsRepo ? analyticsRepo.getExecutionHistory(50).map(mapExec) : [];
+  return { type: 'db:update', timestamp: new Date().toISOString(), tasks, execution };
+}
 
 // Full metrics snapshot pushed to the dashboard pages (Overview/Agents/Tasks/
 // Analytics/Git/Testing/Activity) so they never poll — same data getMetrics()
@@ -332,6 +462,17 @@ function scheduleBroadcast() {
         broadcast(JSON.stringify(metricsPayload));
         console.log(`[ws] broadcast metrics:update (clients=${wss.clients.size})`);
       }
+
+      // SQLite-backed frame — dedupe on the full db payload (excluding timestamp).
+      if (taskRepo || analyticsRepo) {
+        const dbPayload = buildDbPayload();
+        const dCmp = JSON.stringify({ tasks: dbPayload.tasks, execution: dbPayload.execution });
+        if (dCmp !== lastDbStr) {
+          lastDbStr = dCmp;
+          broadcast(JSON.stringify(dbPayload));
+          console.log(`[ws] broadcast db:update (clients=${wss.clients.size})`);
+        }
+      }
     } catch (err) {
       console.error('[ws] broadcast error:', err.message);
     }
@@ -340,6 +481,10 @@ function scheduleBroadcast() {
 
 // Collector notifies here after each poll (fire-and-forget on its side).
 app.post('/api/internal/graph-refresh', (req, res) => {
+  // The collector pings this after every poll — the moment to reconcile the
+  // permanent SQLite task store from Claude's tasks.json and snapshot history.
+  syncTasksSafe('collector-poll');
+  snapshotAnalyticsSafe('collector-poll');
   scheduleBroadcast();
   res.json({ ok: true });
 });
@@ -350,6 +495,7 @@ wss.on('connection', async (ws) => {
   try {
     ws.send(JSON.stringify(await buildPayload()));
     ws.send(JSON.stringify(await buildMetricsPayload()));
+    if (taskRepo || analyticsRepo) ws.send(JSON.stringify(buildDbPayload()));
   } catch (_) { /* ignore send failures on a just-closed socket */ }
   ws.on('error', () => { /* swallow — reconnect handled client-side */ });
 });

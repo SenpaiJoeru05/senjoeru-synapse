@@ -3,7 +3,7 @@ import { motion } from 'framer-motion'
 import { useNavigate } from 'react-router-dom'
 import StatCard from '@/components/StatCard'
 import { api } from '@/lib/api'
-import { useRealtime } from '@/lib/realtime'
+import { useRealtime, useTasks } from '@/lib/realtime'
 import { formatBytes, formatNumber } from '@/lib/utils'
 import {
   Bot, ListTodo, Coins, Clock, Activity, Cpu, DollarSign,
@@ -63,7 +63,7 @@ function relativeTime(iso: string): string {
   return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
 }
 
-function buildActivityFeed(metrics: any) {
+function buildActivityFeed(metrics: any, tasks: any[]) {
   const events: any[] = []
 
   // Real git commits from each repo
@@ -87,7 +87,7 @@ function buildActivityFeed(metrics: any) {
   }
 
   // Task status changes
-  for (const task of (metrics?.tasks?.tasks ?? [])) {
+  for (const task of tasks) {
     const ms = new Date(task.lastUpdated ?? '').getTime()
     if (!task.lastUpdated || isNaN(ms)) continue
     const label =
@@ -184,6 +184,9 @@ export default function Overview() {
   const { metrics, health, ready } = useRealtime() as {
     metrics: any | null; health: SystemHealth | null; ready: boolean
   }
+  // Task list from SQLite (Step 10). Called before any early return to satisfy
+  // the Rules of Hooks (useTasks reads context internally).
+  const allTasks: any[] = useTasks()
   // Settings change rarely and aren't pushed — one REST read is enough.
   const [settings, setSettings] = useState<any | null>(null)
   const loading = !ready && !metrics
@@ -217,8 +220,6 @@ export default function Overview() {
   const thisWeek     = costs?.weekly ?? 0
   const today        = costs?.today ?? 0
 
-  const allTasks: any[] = metrics?.tasks?.tasks ?? []
-
   // Sort: Working → Reviewing → Pending → Completed → Failed, then most recent first
   const sortedTasks = [...allTasks].sort((a, b) => {
     const sa = STATUS_SORT[a.status?.toLowerCase() ?? ''] ?? 99
@@ -247,7 +248,7 @@ export default function Overview() {
   )
 
   // Activity: assembled from real commits + task updates, sorted newest first
-  const activityFeed = buildActivityFeed(metrics)
+  const activityFeed = buildActivityFeed(metrics, allTasks)
 
   // ── render ──────────────────────────────────────────────────────────────────
 

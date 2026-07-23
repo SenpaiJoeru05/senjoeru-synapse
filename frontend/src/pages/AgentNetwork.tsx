@@ -6,7 +6,7 @@ import {
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { motion } from 'framer-motion'
-import { Wifi, WifiOff } from 'lucide-react'
+import { Wifi, WifiOff, RotateCcw } from 'lucide-react'
 import { useAgentNetwork } from '@/lib/useAgentNetwork'
 import type { NetworkEdge, NetworkNode } from '@/lib/network-types'
 import RootNode from '@/components/network/RootNode'
@@ -17,13 +17,33 @@ import NodeInspector from '@/components/network/NodeInspector'
 
 const nodeTypes: NodeTypes = { root: RootNode, agent: AgentNode, repo: RepoNode }
 
-/** Merge server nodes into local state, preserving user-dragged positions. */
-function mergeNodes(prev: NetworkNode[], next: NetworkNode[]): NetworkNode[] {
+// Node layout is presentation state (per ARCHITECTURE-V2) → persisted in the
+// browser, not the backend DB. Survives tab navigation AND app restarts.
+const POSITIONS_KEY = 'synapse.agentNetwork.positions'
+type PosMap = Record<string, { x: number; y: number }>
+
+function loadPositions(): PosMap {
+  try { return JSON.parse(localStorage.getItem(POSITIONS_KEY) || '{}') as PosMap } catch { return {} }
+}
+function savePositions(map: PosMap): void {
+  try { localStorage.setItem(POSITIONS_KEY, JSON.stringify(map)) } catch { /* quota/disabled */ }
+}
+function clearPositions(): void {
+  try { localStorage.removeItem(POSITIONS_KEY) } catch { /* noop */ }
+}
+
+/**
+ * Merge server nodes into local state. Position priority:
+ *   current in-memory (if the node already exists) → saved localStorage layout
+ *   → server default layout.
+ */
+function mergeNodes(prev: NetworkNode[], next: NetworkNode[], saved: PosMap): NetworkNode[] {
   const prevById = new Map(prev.map((n) => [n.id, n]))
   return next.map((n) => {
     const old = prevById.get(n.id)
-    // Existing node: keep its (possibly dragged) position + selection, refresh data.
-    return old ? ({ ...n, position: old.position, selected: old.selected } as NetworkNode) : n
+    if (old) return { ...n, position: old.position, selected: old.selected } as NetworkNode
+    const savedPos = saved[n.id]
+    return savedPos ? ({ ...n, position: savedPos } as NetworkNode) : n
   })
 }
 
@@ -46,12 +66,13 @@ function AgentNetworkInner() {
   const [edges, setEdges, onEdgesChange] = useEdgesState<NetworkEdge>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
 
-  const { fitView } = useReactFlow()
+  const { fitView, getNodes } = useReactFlow()
   const fitted = useRef(false)
+  const savedPositions = useRef<PosMap>(loadPositions())
 
-  // Merge incoming graph — preserves viewport + drag positions.
+  // Merge incoming graph — preserves in-memory + saved (localStorage) positions.
   useEffect(() => {
-    setNodes((prev) => mergeNodes(prev, serverNodes))
+    setNodes((prev) => mergeNodes(prev, serverNodes, savedPositions.current))
   }, [serverNodes, setNodes])
 
   useEffect(() => {
@@ -69,6 +90,22 @@ function AgentNetworkInner() {
 
   const onNodeClick: NodeMouseHandler = useCallback((_, node) => setSelectedId(node.id), [])
   const onPaneClick = useCallback(() => setSelectedId(null), [])
+
+  // Persist the full arrangement after a drag so it survives navigation/restart.
+  const onNodeDragStop = useCallback(() => {
+    const map: PosMap = {}
+    for (const n of getNodes()) map[n.id] = n.position
+    savedPositions.current = map
+    savePositions(map)
+  }, [getNodes])
+
+  // Reset to the server's default layout and forget the saved arrangement.
+  const onReset = useCallback(() => {
+    savedPositions.current = {}
+    clearPositions()
+    setNodes(serverNodes.map((n) => ({ ...n })))
+    requestAnimationFrame(() => fitView({ padding: 0.25, duration: 500 }))
+  }, [serverNodes, setNodes, fitView])
 
   const selectedNode = useMemo(
     () => nodes.find((n) => n.id === selectedId) ?? null,
@@ -110,6 +147,14 @@ function AgentNetworkInner() {
             {connected ? <Wifi size={11} /> : <WifiOff size={11} />}
             {connected ? 'Live' : 'Reconnecting…'}
           </span>
+          <button
+            onClick={onReset}
+            title="Reset layout to default"
+            className="flex items-center gap-1.5 rounded-full border border-white/10 bg-black/50 px-2.5 py-1 text-[10px] font-medium text-slate-300 backdrop-blur-sm transition-colors hover:bg-white/10"
+          >
+            <RotateCcw size={11} />
+            Reset layout
+          </button>
         </motion.div>
 
         {/* Stats */}
@@ -141,6 +186,7 @@ function AgentNetworkInner() {
           edges={edges}
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
+          onNodeDragStop={onNodeDragStop}
           nodeTypes={nodeTypes}
           onNodeClick={onNodeClick}
           onPaneClick={onPaneClick}
