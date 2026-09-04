@@ -75,9 +75,13 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
-  // Dev runs the backend via `concurrently`; only spawn it in production.
-  if (!isDev) startBackend();
-  startCollector();
+  // Dev runs the backend AND the collector via `concurrently` — spawning our
+  // own would mean two collectors polling and writing the same metrics files,
+  // which shows up as values flickering between the two writers' views.
+  if (!isDev) {
+    startBackend();
+    startCollector();
+  }
   createWindow();
 
   app.on('activate', () => {

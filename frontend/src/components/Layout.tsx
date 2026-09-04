@@ -11,7 +11,8 @@ import {
   Brain,
   Users,
   BookOpen,
-  TrendingUp
+  TrendingUp,
+  Bot
 } from 'lucide-react'
 
 const navSections = [
@@ -22,6 +23,7 @@ const navSections = [
   {
     title: 'Work',
     items: [
+      { path: 'joeru', label: 'Joeru', icon: Bot },
       { path: 'team', label: 'Team', icon: Users },
       { path: 'tasks', label: 'Tasks', icon: ListTodo },
     ],

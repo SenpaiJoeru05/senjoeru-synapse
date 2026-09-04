@@ -7,6 +7,7 @@ import Git from './pages/Git'
 import History from './pages/History'
 import Intelligence from './pages/Intelligence'
 import Team from './pages/Team'
+import Joeru from './pages/Joeru'
 import Knowledge from './pages/Knowledge'
 import Insights from './pages/Insights'
 import AgentNetwork from './pages/AgentNetwork'
@@ -24,6 +25,7 @@ function App() {
             <Route path="history" element={<History />} />
             <Route path="intelligence" element={<Intelligence />} />
             <Route path="team" element={<Team />} />
+            <Route path="joeru" element={<Joeru />} />
             <Route path="knowledge" element={<Knowledge />} />
             <Route path="insights" element={<Insights />} />
             <Route path="network" element={<AgentNetwork />} />

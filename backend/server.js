@@ -52,6 +52,9 @@ const { InsightsService } = require('./services/insights-service');
 const { createInsightsRouter } = require('./routes/insights');
 const { AttentionService } = require('./services/attention-service');
 const { createAttentionRouter } = require('./routes/attention');
+const { JoeruService } = require('./services/joeru-service');
+const { MemoryService } = require('./services/memory-service');
+const { createJoeruRouter } = require('./routes/joeru');
 
 const app = express();
 const PORT = 3001;
@@ -257,6 +260,13 @@ if (observationRepo) app.use('/api/observation', createObservationRouter(observa
 if (agentProfileRepo) app.use('/api/agents/profiles', createAgentProfilesRouter(agentProfileRepo));
 if (intelligenceService) app.use('/api/intelligence', createIntelligenceRouter(intelligenceService));
 if (teamService) app.use('/api/team', createTeamRouter(teamService));
+
+// The one token-spending surface in the app. Always mounted — it reports
+// "not running" rather than 404ing when `opencode serve` is down.
+app.use('/api/joeru', createJoeruRouter(
+  new JoeruService({ baseUrl: getWorkspaceConfig().opencodeServerUrl }),
+  new MemoryService({ memoryDir: getWorkspaceConfig().paths.memoryDir }),
+));
 if (notesService) app.use('/api/notes', createNotesRouter(notesService));
 if (bookmarkService) app.use('/api/bookmarks', createBookmarksRouter(bookmarkService));
 if (docIndexService) app.use('/api/docs', createDocsRouter(docIndexRepo, docIndexService));

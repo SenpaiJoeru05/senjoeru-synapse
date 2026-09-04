@@ -122,4 +122,42 @@ export const api = {
   async getAgentActivity(limit = 200): Promise<any> {
     return (await axios.get(`${API_BASE_URL}/observation/agent-activity?limit=${limit}`)).data
   },
+
+  // ── Joeru chat (proxied to `opencode serve`) ────────────────────────────
+  // The only token-spending calls in this client.
+  async joeruHealth(): Promise<any> {
+    return (await axios.get(`${API_BASE_URL}/joeru/health`)).data
+  },
+  // Memory is local markdown in joeru-kit — read/write, but spends no tokens.
+  async joeruMemory(): Promise<any> {
+    return (await axios.get(`${API_BASE_URL}/joeru/memory`)).data
+  },
+  async joeruSaveMemory(folder: string, slug: string, data: { description?: string; body: string }): Promise<any> {
+    return (await axios.put(`${API_BASE_URL}/joeru/memory/${folder}/${encodeURIComponent(slug)}`, data)).data
+  },
+  async joeruDeleteMemory(folder: string, slug: string): Promise<any> {
+    return (await axios.delete(`${API_BASE_URL}/joeru/memory/${folder}/${encodeURIComponent(slug)}`)).data
+  },
+
+  async joeruSessions(): Promise<any> {
+    return (await axios.get(`${API_BASE_URL}/joeru/sessions`)).data
+  },
+  async joeruCreateSession(title?: string): Promise<any> {
+    return (await axios.post(`${API_BASE_URL}/joeru/sessions`, { title })).data
+  },
+  async joeruMessages(sessionId: string): Promise<any> {
+    return (await axios.get(`${API_BASE_URL}/joeru/sessions/${encodeURIComponent(sessionId)}/messages`)).data
+  },
+  async joeruAbort(sessionId: string): Promise<any> {
+    return (await axios.post(`${API_BASE_URL}/joeru/sessions/${encodeURIComponent(sessionId)}/abort`)).data
+  },
+  async joeruSend(sessionId: string, text: string, agent?: string): Promise<any> {
+    // No axios timeout: a free-tier reply can take minutes, and the backend
+    // already bounds it.
+    return (await axios.post(
+      `${API_BASE_URL}/joeru/sessions/${encodeURIComponent(sessionId)}/messages`,
+      { text, agent },
+      { timeout: 0 },
+    )).data
+  },
 }

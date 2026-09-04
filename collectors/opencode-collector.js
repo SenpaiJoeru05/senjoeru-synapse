@@ -61,24 +61,44 @@ function delegationTarget(input) {
   return input.subagent_type || input.subagentType || input.agent || input.agentType || null;
 }
 
+/**
+ * Two very different failures hide behind "no data", and they need opposite
+ * handling:
+ *
+ *   absent      OpenCode isn't installed. A true fact about the machine —
+ *               report it.
+ *   unsupported this runtime has no SQLite binding. Says nothing about
+ *               OpenCode, only about who is asking. Electron 28 bundles Node
+ *               18 and `node:sqlite` landed in 22.5, so the collector spawned
+ *               by Electron hits this while the one on system Node succeeds.
+ *               Both write the same file, so reporting it would overwrite good
+ *               data with a lie — twice a poll, which reads as flicker.
+ */
 function openDatabase(file) {
-  if (!fs.existsSync(file)) return { db: null, reason: `OpenCode database not found at ${file}` };
+  if (!fs.existsSync(file)) {
+    return { db: null, reason: `OpenCode database not found at ${file}`, kind: 'absent' };
+  }
   try {
-    // node:sqlite is built in on Node 22+, which keeps the collectors free of a
-    // native dependency. It is still flagged experimental — the queries here are
-    // plain reads, so the exposure is small, but that's why it's isolated.
     const { DatabaseSync } = require('node:sqlite');
-    return { db: new DatabaseSync(file, { readOnly: true }), reason: null };
+    return { db: new DatabaseSync(file, { readOnly: true }), reason: null, kind: null };
   } catch (err) {
-    return { db: null, reason: `Cannot read OpenCode database: ${err.message}` };
+    const unsupported = /No such built-in module|Cannot find module/i.test(err.message);
+    return {
+      db: null,
+      reason: unsupported
+        ? `No SQLite binding in this runtime (${process.versions.node}): ${err.message}`
+        : `Cannot read OpenCode database: ${err.message}`,
+      kind: unsupported ? 'unsupported' : 'absent',
+    };
   }
 }
 
-function unavailable(reason) {
+function unavailable(reason, kind) {
   return {
     lastUpdated: new Date().toISOString(),
     available: false,
     reason,
+    kind,
     totals: { sessions: 0, messages: 0, toolCalls: 0, toolErrors: 0, cost: 0, tokens: emptyTokens() },
     agents: [], delegations: [], sessions: [], tools: {},
   };
@@ -88,8 +108,8 @@ function collectOpencode() {
   const cfg = getConfig();
   const dbFile = path.join(cfg.paths.opencodeDir, 'opencode.db');
 
-  const { db, reason } = openDatabase(dbFile);
-  if (!db) return unavailable(reason);
+  const { db, reason, kind } = openDatabase(dbFile);
+  if (!db) return unavailable(reason, kind);
 
   try {
     const sessionRows = db.prepare(`
@@ -137,12 +157,22 @@ function collectOpencode() {
 
     // A session with a parent is a subagent run — the delegation actually
     // happening, as opposed to a model merely describing who ought to do it.
-    const titleById = new Map(sessionRows.map((s) => [s.id, s.title]));
+    //
+    // On current OpenCode one handoff leaves two traces: the `task` tool call
+    // that requested it and the child session that resulted. They describe the
+    // same event, so the child session wins (it carries the child's id) and the
+    // matching tool call is suppressed below — otherwise every delegation is
+    // counted twice.
+    const sessionById = new Map(sessionRows.map((s) => [s.id, s]));
+    const spawned = [];
+
     for (const s of sessionRows) {
       if (!s.parent_id) continue;
+      const to = s.agent || 'unknown';
+      spawned.push({ to, at: s.time_created });
       delegations.push({
-        from: titleById.has(s.parent_id) ? (sessionRows.find((p) => p.id === s.parent_id)?.agent || 'unknown') : 'unknown',
-        to: s.agent || 'unknown',
+        from: sessionById.get(s.parent_id)?.agent || 'unknown',
+        to,
         sessionId: s.id,
         parentSessionId: s.parent_id,
         description: s.title || '',
@@ -151,11 +181,21 @@ function collectOpencode() {
       });
     }
 
+    // A `task` call and the session it spawned are seconds apart; anything
+    // wider than this window is a genuinely separate handoff.
+    const SPAWN_WINDOW_MS = 120_000;
+    const alreadySpawned = (to, at) =>
+      spawned.some((s) => s.to === to && Math.abs((s.at || 0) - (at || 0)) < SPAWN_WINDOW_MS);
+
     for (const s of sessionRows) {
       const messages = messagesBySession.get(s.id) || [];
       let toolCalls = 0;
       let toolErrors = 0;
       const agentsSeen = new Set();
+      // Per-session mix, not just the global tally: a session that is all reads
+      // and greps with no write is the signature of an agent stuck in a loop,
+      // and that only shows up when the counts are kept per session.
+      const sessionTools = {};
 
       for (const message of messages) {
         if (message.agent) agentsSeen.add(message.agent);
@@ -176,13 +216,15 @@ function collectOpencode() {
 
           const tool = part.tool || 'unknown';
           tools[tool] = (tools[tool] || 0) + 1;
+          sessionTools[tool] = (sessionTools[tool] || 0) + 1;
           toolCalls += 1;
           if (entry) entry.toolCalls += 1;
           if (part.state?.status === 'error') toolErrors += 1;
 
           if (tool === 'task') {
             const to = delegationTarget(part.state?.input);
-            if (to) {
+            const at = message.time?.created || s.time_updated;
+            if (to && !alreadySpawned(to, at)) {
               delegations.push({
                 from: message.agent || s.agent || 'unknown',
                 to,
@@ -190,7 +232,7 @@ function collectOpencode() {
                 parentSessionId: null,
                 description: part.state?.input?.description || String(part.state?.input?.prompt || '').slice(0, 200),
                 status: part.state?.status || 'unknown',
-                at: message.time?.created || s.time_updated,
+                at,
               });
             }
           }
@@ -228,6 +270,7 @@ function collectOpencode() {
         messages: messages.length,
         toolCalls,
         toolErrors,
+        tools: sessionTools,
         cost: s.cost || 0,
         tokens,
         additions: s.summary_additions || 0,
@@ -260,6 +303,18 @@ function collectOpencode() {
 async function writeOpencodeMetrics() {
   try {
     const data = collectOpencode();
+
+    // A runtime that cannot open SQLite has learned nothing about OpenCode, so
+    // it must not publish. Staying silent lets whichever collector *can* read
+    // own the file, instead of the two overwriting each other every poll.
+    if (data.kind === 'unsupported') {
+      if (!writeOpencodeMetrics._warned) {
+        console.warn(`[opencode] ${data.reason} — leaving metrics to a runtime that can read it`);
+        writeOpencodeMetrics._warned = true;
+      }
+      return data;
+    }
+
     await fs.writeJson(OUTPUT_FILE, data, { spaces: 2 });
     return data;
   } catch (err) {
