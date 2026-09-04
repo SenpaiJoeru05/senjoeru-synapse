@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { motion } from 'framer-motion'
 import { useNavigate } from 'react-router-dom'
 import StatCard from '@/components/StatCard'
+import NotificationBell from '@/components/NotificationBell'
 import { api } from '@/lib/api'
 import { useRealtime, useTasks } from '@/lib/realtime'
 import { formatBytes, formatNumber } from '@/lib/utils'
@@ -263,13 +264,16 @@ export default function Overview() {
         </motion.div>
         <motion.div
           initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }}
-          className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-surface2 border border-white/10"
+          className="flex items-center gap-3"
         >
-          <div className="relative">
-            <div className="w-2 h-2 rounded-full bg-success animate-pulse" />
-            <div className="absolute inset-0 w-2 h-2 rounded-full bg-success animate-ping opacity-75" />
+          <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-surface2 border border-white/10">
+            <div className="relative">
+              <div className="w-2 h-2 rounded-full bg-success animate-pulse" />
+              <div className="absolute inset-0 w-2 h-2 rounded-full bg-success animate-ping opacity-75" />
+            </div>
+            <span className="text-xs text-gray-400">Auto-refresh: {settings?.pollInterval || 5}s</span>
           </div>
-          <span className="text-xs text-gray-400">Auto-refresh: {settings?.pollInterval || 5}s</span>
+          <NotificationBell />
         </motion.div>
       </div>
 
@@ -376,7 +380,7 @@ export default function Overview() {
             <h2 className="text-base font-bold flex items-center gap-2">
               <Bot className="w-5 h-5 text-secondary" />Agent Status
             </h2>
-            <button onClick={() => navigate('/agents')}
+            <button onClick={() => navigate('/team')}
               className="text-sm text-accent hover:text-accent/80 flex items-center gap-1 transition-colors">
               View All <ArrowRight className="w-4 h-4" />
             </button>
@@ -418,12 +422,12 @@ export default function Overview() {
                       </div>
                       {/* Info */}
                       <div className="flex-1 min-w-0">
-                        <p className="text-sm font-semibold truncate leading-tight">{agent.name}</p>
+                        <p className="text-sm font-semibold truncate leading-tight">{agent.displayName || agent.name}</p>
                         {isWorking && agent.activeCwd
                           ? <p className="text-[11px] text-emerald-400 truncate font-mono">
                               {String(agent.activeCwd).split(/[/\\]/).pop()}
                             </p>
-                          : <p className="text-[11px] text-gray-600">Specialist agent</p>
+                          : <p className="text-[11px] text-gray-600 truncate">{agent.lastUpdate || 'No recent activity'}</p>
                         }
                       </div>
                       {/* Status badge */}
@@ -450,7 +454,7 @@ export default function Overview() {
           <h2 className="text-base font-bold flex items-center gap-2">
             <Activity className="w-5 h-5 text-accent" />Recent Activity
           </h2>
-          <button onClick={() => navigate('/activity')}
+          <button onClick={() => navigate('/history')}
             className="text-sm text-accent hover:text-accent/80 flex items-center gap-1 transition-colors">
             View All <ArrowRight className="w-4 h-4" />
           </button>

@@ -2,13 +2,13 @@ import { BrowserRouter as Router, Routes, Route } from 'react-router-dom'
 import { RealtimeProvider } from './lib/realtime'
 import Layout from './components/Layout'
 import Overview from './pages/Overview'
-import Agents from './pages/Agents'
 import Tasks from './pages/Tasks'
-import Analytics from './pages/Analytics'
 import Git from './pages/Git'
-import Testing from './pages/Testing'
-import Activity from './pages/Activity'
 import History from './pages/History'
+import Intelligence from './pages/Intelligence'
+import Team from './pages/Team'
+import Knowledge from './pages/Knowledge'
+import Insights from './pages/Insights'
 import AgentNetwork from './pages/AgentNetwork'
 import Settings from './pages/Settings'
 
@@ -19,13 +19,13 @@ function App() {
         <Routes>
           <Route path="/" element={<Layout />}>
             <Route index element={<Overview />} />
-            <Route path="agents" element={<Agents />} />
             <Route path="tasks" element={<Tasks />} />
-            <Route path="analytics" element={<Analytics />} />
             <Route path="git" element={<Git />} />
-            <Route path="testing" element={<Testing />} />
-            <Route path="activity" element={<Activity />} />
             <Route path="history" element={<History />} />
+            <Route path="intelligence" element={<Intelligence />} />
+            <Route path="team" element={<Team />} />
+            <Route path="knowledge" element={<Knowledge />} />
+            <Route path="insights" element={<Insights />} />
             <Route path="network" element={<AgentNetwork />} />
             <Route path="settings" element={<Settings />} />
           </Route>

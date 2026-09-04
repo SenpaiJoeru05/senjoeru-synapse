@@ -9,9 +9,11 @@
  * generated cache written by the owner (Synapse), never the source of truth.
  */
 const fs = require('fs-extra');
+const os = require('os');
+const path = require('path');
 
 const DEFAULTS = {
-  claudeDir: 'C:\\Users\\joelr\\.claude',
+  claudeDir: process.env.SYNAPSE_CLAUDE_DIR || path.join(os.homedir(), '.claude'),
   pollInterval: 30,
   monitorClaudeDir: true,
   repositories: [],
@@ -69,9 +71,15 @@ class SettingsService {
   _mirrorToConfig(settings) {
     if (!this.configMirrorPath) return;
     try {
+      // Merge onto the existing file so workspace-only config the UI doesn't
+      // manage (workspace, repoAgents, pricing, agentRoles) is preserved.
+      let existing = {};
+      try {
+        if (fs.existsSync(this.configMirrorPath)) existing = fs.readJsonSync(this.configMirrorPath);
+      } catch (_) { /* treat as empty */ }
       fs.writeJsonSync(
         this.configMirrorPath,
-        { ...settings, lastUpdated: new Date().toISOString() },
+        { ...existing, ...settings, lastUpdated: new Date().toISOString() },
         { spaces: 2 }
       );
     } catch (_) { /* mirror is best-effort; SQLite remains authoritative */ }

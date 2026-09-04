@@ -67,7 +67,7 @@ function normalizeBoard(board) {
   return board.tasks.map((t, i) => ({
     id:            String(t.id || i + 1),
     title:         t.title || 'Untitled task',
-    assignedAgent: t.assignedAgent || 'AI Chatbot Engineer',
+    assignedAgent: t.assignedAgent || 'Unassigned',
     repos:         Array.isArray(t.repos) ? t.repos : [],
     progress:      typeof t.progress === 'number' ? t.progress : 0,
     status:        t.status || 'Pending',

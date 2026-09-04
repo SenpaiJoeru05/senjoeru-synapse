@@ -1,29 +1,51 @@
 import { Outlet, Link, useLocation } from 'react-router-dom'
 import { motion } from 'framer-motion'
+import AttentionNotifier from './AttentionNotifier'
 import {
   LayoutDashboard,
-  Bot,
   ListTodo,
-  BarChart3,
   GitBranch,
-  TestTube,
-  Activity,
   Settings,
   Network,
-  History
+  History,
+  Brain,
+  Users,
+  BookOpen,
+  TrendingUp
 } from 'lucide-react'
 
-const navItems = [
-  { path: '/', label: 'Overview', icon: LayoutDashboard },
-  { path: 'agents', label: 'Agents', icon: Bot },
-  { path: 'tasks', label: 'Tasks', icon: ListTodo },
-  { path: 'analytics', label: 'Analytics', icon: BarChart3 },
-  { path: 'git', label: 'Git', icon: GitBranch },
-  { path: 'testing', label: 'Testing', icon: TestTube },
-  { path: 'activity', label: 'Activity', icon: Activity },
-  { path: 'history', label: 'History', icon: History },
-  { path: 'network', label: 'Agent Network', icon: Network },
-  { path: 'settings', label: 'Settings', icon: Settings },
+const navSections = [
+  {
+    title: null,
+    items: [{ path: '/', label: 'Overview', icon: LayoutDashboard }],
+  },
+  {
+    title: 'Work',
+    items: [
+      { path: 'team', label: 'Team', icon: Users },
+      { path: 'tasks', label: 'Tasks', icon: ListTodo },
+    ],
+  },
+  {
+    title: 'Analyze',
+    items: [
+      { path: 'intelligence', label: 'Intelligence', icon: Brain },
+      { path: 'insights', label: 'Insights', icon: TrendingUp },
+      { path: 'knowledge', label: 'Knowledge', icon: BookOpen },
+    ],
+  },
+  {
+    title: 'Activity',
+    items: [
+      { path: 'git', label: 'Git', icon: GitBranch },
+      { path: 'history', label: 'History', icon: History },
+      { path: 'network', label: 'Agent Network', icon: Network },
+    ],
+  },
+  {
+    title: 'System',
+    items: [{ path: 'settings', label: 'Settings', icon: Settings }],
+  },
 ]
 
 export default function Layout() {
@@ -65,27 +87,38 @@ export default function Layout() {
         </div>
 
         {/* Navigation */}
-        <nav className="flex-1 p-3 space-y-0.5">
-          {navItems.map((item) => {
-            const Icon = item.icon
-            const isActive = location.pathname === item.path ||
-              (item.path !== '/' && location.pathname.startsWith('/' + item.path))
+        <nav className="flex-1 p-3 overflow-y-auto scrollbar-hide">
+          {navSections.map((section, si) => (
+            <div key={section.title ?? 'top'} className={si > 0 ? 'mt-4' : ''}>
+              {section.title && (
+                <p className="px-3 mb-1 text-[10px] font-semibold uppercase tracking-wider text-gray-600">
+                  {section.title}
+                </p>
+              )}
+              <div className="space-y-0.5">
+                {section.items.map((item) => {
+                  const Icon = item.icon
+                  const isActive = location.pathname === item.path ||
+                    (item.path !== '/' && location.pathname.startsWith('/' + item.path))
 
-            return (
-              <Link
-                key={item.path}
-                to={item.path}
-                className={`flex items-center gap-2.5 px-3 py-2 rounded-lg transition-all duration-150 ${
-                  isActive
-                    ? 'bg-gradient-primary text-white neon-glow'
-                    : 'text-gray-400 hover:text-white hover:bg-white/5'
-                }`}
-              >
-                <Icon className="w-4 h-4 shrink-0" />
-                <span className="text-sm font-medium">{item.label}</span>
-              </Link>
-            )
-          })}
+                  return (
+                    <Link
+                      key={item.path}
+                      to={item.path}
+                      className={`flex items-center gap-2.5 px-3 py-2 rounded-lg transition-all duration-150 ${
+                        isActive
+                          ? 'bg-gradient-primary text-white neon-glow'
+                          : 'text-gray-400 hover:text-white hover:bg-white/5'
+                      }`}
+                    >
+                      <Icon className="w-4 h-4 shrink-0" />
+                      <span className="text-sm font-medium">{item.label}</span>
+                    </Link>
+                  )
+                })}
+              </div>
+            </div>
+          ))}
         </nav>
 
         {/* Footer */}
@@ -98,6 +131,9 @@ export default function Layout() {
       <main className="flex-1 overflow-auto min-w-0">
         <Outlet />
       </main>
+
+      {/* Global desktop-notification driver (renders nothing) */}
+      <AttentionNotifier />
     </div>
   )
 }

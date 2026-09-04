@@ -13,7 +13,8 @@
  */
 const path = require('path');
 const fs = require('fs-extra');
-const { AGENT_REPOS, ALL_REPOS, REPO_PRIMARY_AGENTS } = require('../../shared/agent-repos');
+const { getAgentRepos, getAllRepos, getRepoPrimaryAgents } = require('../../shared/agent-repos');
+const { getConfig } = require('../../shared/workspace-config');
 
 const METRICS_DIR = path.join(__dirname, '../../metrics');
 
@@ -104,6 +105,11 @@ async function buildGraph(preloaded) {
   const agents = Array.isArray(agentsData.agents) ? agentsData.agents : [];
   const tasks = Array.isArray(tasksData.tasks) ? tasksData.tasks : [];
 
+  // Config-driven repo topology (resolved live, not hardcoded).
+  const ALL_REPOS = getAllRepos();
+  const AGENT_REPOS = getAgentRepos();
+  const REPO_PRIMARY_AGENTS = getRepoPrimaryAgents();
+
   // Tasks grouped by their assigned agent (for the inspector panel).
   // Keyed by a normalized slug of assignedAgent so human-written strings
   // ("AI Chatbot Engineer", "ai-chatbot-engineer", "Ai Chatbot engineer") all
@@ -134,7 +140,7 @@ async function buildGraph(preloaded) {
     id: ROOT_ID,
     type: 'root',
     data: {
-      label: 'FlowerStorePH',
+      label: getConfig().workspace.name,
       workingCount,
       agentCount: agents.length,
       repoCount: ALL_REPOS.length,

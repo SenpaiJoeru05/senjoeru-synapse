@@ -7,6 +7,7 @@ const axios = require('axios');
 // Backend endpoint pinged after each poll so it can rebuild + broadcast the
 // agent-network graph. Fire-and-forget: the backend may not be running.
 const BACKEND_REFRESH_URL = 'http://localhost:3001/api/internal/graph-refresh';
+const AUTO_REGISTER_URL = 'http://localhost:3001/api/internal/auto-register';
 
 async function notifyBackend() {
   try {
@@ -16,17 +17,36 @@ async function notifyBackend() {
   }
 }
 
-const METRICS_DIR = path.join(__dirname, '../metrics');
-const CLAUDE_DIR = 'C:\\Users\\joelr\\.claude';
-const PROJECTS_DIR = path.join(CLAUDE_DIR, 'projects');
-const SESSIONS_DIR = path.join(CLAUDE_DIR, 'sessions');
+// Ask the backend to auto-track any git repo we have a live session in but
+// aren't monitoring yet — so working in a new repo adds it with no manual step.
+async function autoRegisterRepos() {
+  try {
+    await axios.post(AUTO_REGISTER_URL, {}, { timeout: 2000 });
+  } catch (_) {
+    // Backend down — non-fatal; we'll retry next poll.
+  }
+}
 
-// Claude Sonnet 4.6 pricing per token
+const { getConfig, roleDisplayName } = require('../shared/workspace-config');
+const { getRepoPrimaryAgents } = require('../shared/agent-repos');
+const { writeOpencodeMetrics } = require('./opencode-collector');
+
+const METRICS_DIR = path.join(__dirname, '../metrics');
+
+// Workspace specifics (paths, pricing, repos, agent roster) all come from
+// metrics/config.json via the shared loader — nothing here is pinned to a
+// particular machine or project. Falls back to <home>/.claude + Sonnet 4.6
+// pricing when unset. See docs/roadmap/WORKSPACE-PORTABILITY.md.
+const _cfg = getConfig();
+const CLAUDE_DIR = _cfg.paths.claudeDir;
+const PROJECTS_DIR = _cfg.paths.projectsDir;
+const SESSIONS_DIR = _cfg.paths.sessionsDir;
+
 const PRICING = {
-  input:       3.00 / 1_000_000,
-  output:     15.00 / 1_000_000,
-  cache_read:  0.30 / 1_000_000,
-  cache_write: 3.75 / 1_000_000,
+  input:       _cfg.pricing.perToken.input,
+  output:      _cfg.pricing.perToken.output,
+  cache_read:  _cfg.pricing.perToken.cacheRead,
+  cache_write: _cfg.pricing.perToken.cacheWrite,
 };
 
 fs.ensureDirSync(METRICS_DIR);
@@ -44,10 +64,9 @@ function calcCost(t) {
 
 function formatProjectName(dirName) {
   return dirName
-    .replace(/^[dD]--/, '')
-    .replace(/JOELRAYTON-WORKS-/, '')
-    .replace(/FlowerStorePH-/, 'FlowerStorePH / ')
-    .replace(/-/g, ' ');
+    .replace(/^[a-zA-Z]--/, '')   // strip the drive-letter prefix, e.g. "d--"
+    .replace(/-/g, ' ')
+    .trim();
 }
 
 function dayKey(isoTimestamp) {
@@ -390,7 +409,7 @@ async function collectTasks() {
         tasks,
       }, { spaces: 2 });
 
-      console.log(`[tasks] loaded=${tasks.length} from C:\\Users\\joelr\\.claude\\tasks.json`);
+      console.log(`[tasks] loaded=${tasks.length} from ${_cfg.paths.tasksFile}`);
       return;
     }
     // Board exists but is unrecoverable — warn loudly before falling back so the
@@ -467,29 +486,17 @@ function parseAgentFrontmatter(content) {
   return fm;
 }
 
-function formatAgentName(slug) {
-  // "ai-chatbot-engineer" → "AI Chatbot Engineer"
-  return slug
-    .split('-')
-    .map(word => {
-      // Keep known acronyms uppercased
-      if (['ai', 'db', 'qa', 'cs'].includes(word.toLowerCase())) {
-        return word.toUpperCase();
-      }
-      return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
-    })
-    .join(' ');
-}
+// formatAgentName / roleDisplayName are imported from the shared workspace-config
+// loader (generic, acronym-aware, honors per-role display overrides in config).
 
 function inferProject(description) {
+  const name = _cfg.workspace.name;
   if (!description) return 'General';
-  return description.includes('FlowerStorePH') ? 'FlowerStorePH' : 'General';
+  return description.includes(name) ? name : 'General';
 }
 
-// Which agents are primary for a given CWD?
-// Sourced from the shared single-source-of-truth map (also used by the backend
-// graph-builder) so repo<->agent assignments never drift between processes.
-const { REPO_PRIMARY_AGENTS } = require('../shared/agent-repos');
+// Which agents are primary for a given CWD? — resolved live from the shared,
+// config-driven map (getRepoPrimaryAgents), imported at the top of this file.
 
 // How we detect "working": a session's JSONL conversation file was written recently.
 // Claude writes to it after every response — so mtime = time of last Claude reply.
@@ -559,17 +566,20 @@ async function getActiveAgentNames() {
 
       console.log(`[sessions]   ${path.basename(data.cwd)}: last activity ${mtime ? minutesAgo + 'm ago' : 'never'} → ${isRecent ? 'WORKING' : 'idle'}`);
 
-      // Map this session's cwd to the agents that own the repo.
+      // Map this session's cwd to the agents that own the repo (config-driven).
       const fullPathLower = data.cwd.toLowerCase().replace(/\\/g, '/');
       const matched = new Set();
-      for (const [repo, names] of Object.entries(REPO_PRIMARY_AGENTS)) {
-        if (repo === 'flowerstoreph') continue;
+      const primaryAgents = getRepoPrimaryAgents();
+      const rootKey = _cfg.workspace.rootKey;
+      for (const [repo, names] of Object.entries(primaryAgents)) {
+        if (repo === rootKey) continue;
         if (fullPathLower.includes('/' + repo) || fullPathLower.endsWith(repo)) {
           names.forEach(n => matched.add(n));
         }
       }
-      if (matched.size === 0 && fullPathLower.includes('flowerstoreph')) {
-        REPO_PRIMARY_AGENTS['flowerstoreph'].forEach(n => matched.add(n));
+      // Fallback: cwd is the workspace root itself (not a specific repo).
+      if (matched.size === 0 && rootKey && fullPathLower.includes(rootKey)) {
+        (primaryAgents[rootKey] || []).forEach(n => matched.add(n));
       }
 
       for (const n of matched) {
@@ -596,7 +606,11 @@ async function collectAgents() {
     : null;
 
   if (fs.existsSync(AGENTS_DIR)) {
-    const files = (await fs.readdir(AGENTS_DIR)).filter(f => f.endsWith('.md'));
+    // Agent definitions only — exclude per-agent memory files (`*.memory.md`),
+    // which live in agents/memory/ but are excluded here too for safety so they
+    // never get miscounted as agents.
+    const files = (await fs.readdir(AGENTS_DIR))
+      .filter(f => f.endsWith('.md') && !f.endsWith('.memory.md'));
 
     for (let i = 0; i < files.length; i++) {
       const filePath = path.join(AGENTS_DIR, files[i]);
@@ -606,7 +620,7 @@ async function collectAgents() {
         const fm = parseAgentFrontmatter(content);
         const slug = fm.name || path.basename(files[i], '.md');
         const description = fm.description || '';
-        const formattedName = formatAgentName(slug);
+        const formattedName = roleDisplayName(slug);
         const truncatedDesc = description.length > 100
           ? description.slice(0, 97) + '...'
           : description;
@@ -621,7 +635,11 @@ async function collectAgents() {
 
         agents.push({
           id:              String(i + 1),
+          slug,                                   // e.g. "backend-engineer" (wiring id)
           name:            formattedName,
+          displayName:     fm.displayName || null, // e.g. "Miguel Santos" (persona)
+          title:           fm.title || null,       // e.g. "Senior Backend Engineer"
+          model:           fm.model || null,
           status:          isWorking ? 'Working' : 'Idle',
           currentTask:     truncatedDesc || 'No description',
           progress:        0,
@@ -652,30 +670,12 @@ async function collectAgents() {
   }
 }
 
-// ─── git collector (real repos from FlowerStorePH) ───────────────────────────
-
-// Repos to monitor — add/remove as needed
-const GIT_REPOS = [
-  'd:\\FlowerStorePH\\fs-llm-service',
-  'd:\\FlowerStorePH\\cs-dashboard',
-  'd:\\FlowerStorePH\\chat-widget',
-  'd:\\FlowerStorePH\\fsweb',
-];
+// ─── git collector (repos come from the workspace config) ────────────────────
 
 async function collectGit() {
-  // Try to load repo list from metrics/config.json; fall back to GIT_REPOS constant
-  let repoList = GIT_REPOS;
-  try {
-    const configPath = path.join(METRICS_DIR, 'config.json');
-    if (fs.existsSync(configPath)) {
-      const config = await fs.readJson(configPath);
-      if (Array.isArray(config.repositories) && config.repositories.length > 0) {
-        repoList = config.repositories;
-      }
-    }
-  } catch (_) {
-    // config.json missing or malformed — stick with hardcoded fallback
-  }
+  // Repo paths are workspace config (metrics/config.json → repositories), read
+  // fresh each poll so Settings changes take effect without a collector restart.
+  const repoList = getConfig().repoPaths;
 
   const repos = [];
 
@@ -830,8 +830,11 @@ async function poll() {
       collectAgents(),
       collectGit(),
       collectActivity(),
+      writeOpencodeMetrics(),   // OpenCode / Joeru sessions — no-ops if not installed
     ]);
-    // Metrics regenerated — tell the backend to rebuild + broadcast the graph.
+    // Auto-track any new repo we're actively working in, then tell the backend
+    // to rebuild + broadcast the graph.
+    autoRegisterRepos();
     notifyBackend();
   } catch (err) {
     console.error('[collector] error:', err.message);
@@ -844,6 +847,9 @@ const watchPaths = [
   path.join(CLAUDE_DIR, 'projects'),
   CLAUDE_TASKS_FILE,                       // tasks.json — Claude agents write here
   path.join(METRICS_DIR, 'config.json'),   // settings — repo list changes take effect immediately
+  path.join(_cfg.paths.opencodeDir, 'opencode.db-wal'),  // OpenCode writes in WAL mode; the
+                                                         // .db file itself barely changes, so
+                                                         // the WAL is what signals new activity
 ];
 
 const existingWatchPaths = watchPaths.filter(p => {

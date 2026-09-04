@@ -8,7 +8,7 @@ const http = require('http');
 const { WebSocketServer } = require('ws');
 const { buildLaidOutGraph } = require('./lib/graph-builder');
 const networkRouter = require('./routes/network');
-const { openDatabase } = require('./lib/db');
+const { openDatabase, DEFAULT_DB_PATH } = require('./lib/db');
 const { TaskRepository } = require('./repositories/task-repository');
 const { TaskSyncService } = require('./services/task-sync-service');
 const { createTasksRouter, mapTask } = require('./routes/tasks');
@@ -28,6 +28,30 @@ const { AnalyticsService } = require('./services/analytics-service');
 const {
   createAnalyticsRouter, createExecutionHistoryRouter, mapExec,
 } = require('./routes/analytics');
+const { ObservationRepository } = require('./repositories/observation-repository');
+const { ObservationService } = require('./services/observation-service');
+const { createObservationRouter } = require('./routes/observation');
+const { AgentProfileRepository } = require('./repositories/agent-profile-repository');
+const { AgentProfileService } = require('./services/agent-profile-service');
+const { createAgentProfilesRouter } = require('./routes/agent-profiles');
+const { IntelligenceService } = require('./services/intelligence-service');
+const { createIntelligenceRouter } = require('./routes/intelligence');
+const { AgentMemoryRepository } = require('./repositories/agent-memory-repository');
+const { TeamService } = require('./services/team-service');
+const { createTeamRouter } = require('./routes/team');
+const {
+  NotesRepository, BookmarkRepository, DocIndexRepository,
+} = require('./repositories/knowledge-repository');
+const { NotesService, BookmarkService } = require('./services/knowledge-service');
+const { DocIndexService } = require('./services/doc-index-service');
+const { SearchService } = require('./services/search-service');
+const {
+  createNotesRouter, createBookmarksRouter, createDocsRouter, createSearchRouter,
+} = require('./routes/knowledge');
+const { InsightsService } = require('./services/insights-service');
+const { createInsightsRouter } = require('./routes/insights');
+const { AttentionService } = require('./services/attention-service');
+const { createAttentionRouter } = require('./routes/attention');
 
 const app = express();
 const PORT = 3001;
@@ -36,10 +60,13 @@ const PORT = 3001;
 app.use(cors());
 app.use(express.json());
 
-// Paths
+// Paths — the `.claude` location comes from the workspace config (falls back to
+// <home>/.claude), so the backend is not pinned to one machine.
+const { getConfig: getWorkspaceConfig } = require('../shared/workspace-config');
+const _wsCfg = getWorkspaceConfig();
 const METRICS_DIR = path.join(__dirname, '../metrics');
-const CLAUDE_DIR = 'C:\\Users\\joelr\\.claude';
-const CLAUDE_TASKS_FILE = path.join(CLAUDE_DIR, 'tasks.json');
+const CLAUDE_DIR = _wsCfg.paths.claudeDir;
+const CLAUDE_TASKS_FILE = _wsCfg.paths.tasksFile;
 
 // Ensure metrics directory exists
 fs.ensureDirSync(METRICS_DIR);
@@ -78,8 +105,23 @@ let projectService = null;
 let repositoryService = null;
 let analyticsRepo = null;
 let analyticsService = null;
+let observationRepo = null;
+let observationService = null;
+let agentProfileRepo = null;
+let agentProfileService = null;
+let intelligenceService = null;
+let teamService = null;
+let notesService = null;
+let bookmarkService = null;
+let docIndexRepo = null;
+let docIndexService = null;
+let searchService = null;
+let insightsService = null;
+let attentionService = null;
+let dbRef = null;
 try {
   const db = openDatabase();
+  dbRef = db;
 
   // Tasks (imported one-way from Claude's tasks.json).
   taskRepo = new TaskRepository(db);
@@ -90,6 +132,33 @@ try {
   analyticsRepo = new AnalyticsRepository(db);
   analyticsService = new AnalyticsService(analyticsRepo, METRICS_DIR);
 
+  // Observation history (Phase 2): persist git/session/agent state over time.
+  observationRepo = new ObservationRepository(db);
+  observationService = new ObservationService(db, METRICS_DIR);
+
+  // Agent personas (Track B): import displayName/title from .claude/agents.
+  agentProfileRepo = new AgentProfileRepository(db);
+  agentProfileService = new AgentProfileService(agentProfileRepo, METRICS_DIR);
+
+  // Engineering intelligence (Phase 3): computed insights, derived on read.
+  intelligenceService = new IntelligenceService(db, METRICS_DIR);
+
+  // Team view (Phase 4): personas + memory read live from .claude/agents.
+  teamService = new TeamService(path.join(CLAUDE_DIR, 'agents'), new AgentMemoryRepository(db));
+  teamService.syncMemory(); // store a permanent copy of agent memory
+
+  // Knowledge Layer (Phase 4): notes, bookmarks, docs index, FTS5 search.
+  notesService = new NotesService(new NotesRepository(db));
+  bookmarkService = new BookmarkService(new BookmarkRepository(db));
+  docIndexRepo = new DocIndexRepository(db);
+  docIndexService = new DocIndexService(docIndexRepo, METRICS_DIR);
+  searchService = new SearchService(db);
+  const docs = docIndexService.reindexIfEmpty(); // index repo docs once if empty
+  console.log(`[db] knowledge ready; docs ${JSON.stringify(docs)}; search engine=${searchService.ftsOk ? 'fts5' : 'like'}`);
+
+  // Insights & analytics (Phase 5): computed from history, derived on read.
+  insightsService = new InsightsService(db);
+
   // Relational core + settings.
   workspaceService = new WorkspaceService(new WorkspaceRepository(db));
   projectService = new ProjectService(new ProjectRepository(db));
@@ -99,16 +168,21 @@ try {
     path.join(METRICS_DIR, 'config.json')
   );
 
+  // Proactive attention queue (zero-token; tasks + budgets + costs).
+  attentionService = new AttentionService(taskRepo, settingsService, METRICS_DIR);
+
   // Seed once: a default workspace + settings imported from config.json.
   const ws = workspaceService.ensureDefault();
   const seeded = settingsService.seedFromConfigIfEmpty();
 
   // Initial history snapshot from whatever metrics already exist on disk.
   const snap = analyticsService.snapshotAll(taskRepo);
+  const obs = observationService.snapshotAll();
+  const prof = agentProfileService.sync();
   console.log(
     `[db] SQLite ready; task sync ${JSON.stringify(summary)}; ` +
     `workspace="${ws.name}"; settings ${seeded ? 'seeded from config.json' : 'loaded'}; ` +
-    `analytics ${JSON.stringify(snap)}`
+    `analytics ${JSON.stringify(snap)}; observation ${JSON.stringify(obs)}; profiles ${JSON.stringify(prof)}`
   );
 } catch (err) {
   console.error('[db] SQLite unavailable — persistence disabled:', err.message);
@@ -125,6 +199,29 @@ function snapshotAnalyticsSafe(trigger) {
     }
   } catch (err) {
     console.error(`[db] analytics snapshot failed (${trigger}):`, err.message);
+  }
+}
+
+// Persist observation (git/session/agent) history. Guarded like the above.
+function snapshotObservationSafe(trigger) {
+  if (!observationService) return;
+  try {
+    const obs = observationService.snapshotAll();
+    if (obs.repoChanges || obs.sessionsEnded || obs.agentChanges) {
+      console.log(`[db] observation (${trigger}): ${JSON.stringify(obs)}`);
+    }
+  } catch (err) {
+    console.error(`[db] observation snapshot failed (${trigger}):`, err.message);
+  }
+}
+
+// Import agent personas (displayName/title) into SQLite. Guarded.
+function syncAgentProfilesSafe(trigger) {
+  if (!agentProfileService) return;
+  try {
+    agentProfileService.sync();
+  } catch (err) {
+    console.error(`[db] agent-profile sync failed (${trigger}):`, err.message);
   }
 }
 
@@ -156,6 +253,27 @@ if (analyticsRepo) {
   app.use('/api/analytics', createAnalyticsRouter(analyticsRepo));
   app.use('/api/execution-history', createExecutionHistoryRouter(analyticsRepo));
 }
+if (observationRepo) app.use('/api/observation', createObservationRouter(observationRepo));
+if (agentProfileRepo) app.use('/api/agents/profiles', createAgentProfilesRouter(agentProfileRepo));
+if (intelligenceService) app.use('/api/intelligence', createIntelligenceRouter(intelligenceService));
+if (teamService) app.use('/api/team', createTeamRouter(teamService));
+if (notesService) app.use('/api/notes', createNotesRouter(notesService));
+if (bookmarkService) app.use('/api/bookmarks', createBookmarksRouter(bookmarkService));
+if (docIndexService) app.use('/api/docs', createDocsRouter(docIndexRepo, docIndexService));
+if (searchService) app.use('/api/search', createSearchRouter(searchService));
+if (insightsService) app.use('/api/insights', createInsightsRouter(insightsService));
+if (attentionService) app.use('/api/attention', createAttentionRouter(attentionService));
+
+// C1 — Data safety: export a consistent copy of the SQLite database.
+app.get('/api/backup/export', (req, res) => {
+  try {
+    if (!dbRef) return res.status(503).json({ error: 'database unavailable' });
+    dbRef.pragma('wal_checkpoint(TRUNCATE)'); // flush WAL so the file is consistent
+    res.download(DEFAULT_DB_PATH, 'synapse-export.db');
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
 // API Routes
 app.get('/api/metrics/:type', async (req, res) => {
@@ -181,6 +299,7 @@ const METRIC_FILES = {
   agents: 'agents.json', tasks: 'tasks.json', tokens: 'tokens.json',
   costs: 'costs.json', tests: 'tests.json', git: 'git.json',
   sessions: 'sessions.json', activity: 'activity.json',
+  opencode: 'opencode.json',
 };
 async function readAllMetrics() {
   const out = {};
@@ -485,8 +604,82 @@ app.post('/api/internal/graph-refresh', (req, res) => {
   // permanent SQLite task store from Claude's tasks.json and snapshot history.
   syncTasksSafe('collector-poll');
   snapshotAnalyticsSafe('collector-poll');
+  snapshotObservationSafe('collector-poll');
+  syncAgentProfilesSafe('collector-poll');
+  if (teamService) { try { teamService.syncMemory(); } catch (_) {} }
   scheduleBroadcast();
   res.json({ ok: true });
+});
+
+// ── Auto-register repos ────────────────────────────────────────────────────
+// "When I chat in a repo, track it automatically." The collector pings this each
+// poll; we scan active Claude sessions for git repos not yet tracked and add
+// them (repositories → SQLite via SettingsService; a default owner → config so
+// they appear connected in the Agent Network, not as orphan nodes).
+const DEFAULT_REPO_OWNER = ['project-manager'];
+
+function normRepoPath(p) {
+  return String(p || '').toLowerCase().replace(/\\/g, '/').replace(/\/+$/, '');
+}
+
+async function detectSessionGitRepos() {
+  const sessionsDir = path.join(CLAUDE_DIR, 'sessions');
+  const repos = new Set();
+  if (!fs.existsSync(sessionsDir)) return [];
+  const files = await fs.readdir(sessionsDir);
+  for (const f of files) {
+    if (!f.endsWith('.json')) continue;
+    try {
+      const data = await fs.readJson(path.join(sessionsDir, f));
+      // Only the exact cwd you're working in, and only if it's a git repo.
+      if (data.cwd && fs.existsSync(path.join(data.cwd, '.git'))) repos.add(data.cwd);
+    } catch (_) { /* skip unreadable session */ }
+  }
+  return [...repos];
+}
+
+function registerRepoPaths(candidatePaths) {
+  if (!settingsService || !Array.isArray(candidatePaths) || candidatePaths.length === 0) {
+    return { added: 0, repos: [] };
+  }
+  const current = settingsService.getAll().repositories || [];
+  const seen = new Set(current.map(normRepoPath));
+  const toAdd = [];
+  for (const p of candidatePaths) {
+    const n = normRepoPath(p);
+    if (!seen.has(n)) { seen.add(n); toAdd.push(p); }
+  }
+  if (toAdd.length === 0) return { added: 0, repos: [] };
+
+  // repositories → SQLite (source of truth) + config.json mirror (merge keeps repoAgents).
+  settingsService.save({ repositories: [...current, ...toAdd] });
+
+  // Default owner so a new repo shows a live edge instead of floating orphaned.
+  try {
+    const cfgPath = path.join(METRICS_DIR, 'config.json');
+    const cfg = fs.existsSync(cfgPath) ? fs.readJsonSync(cfgPath) : {};
+    cfg.repoAgents = cfg.repoAgents || {};
+    for (const p of toAdd) {
+      const name = path.basename(p.replace(/[\\/]+$/, ''));
+      if (!cfg.repoAgents[name]) cfg.repoAgents[name] = [...DEFAULT_REPO_OWNER];
+    }
+    fs.writeJsonSync(cfgPath, cfg, { spaces: 2 });
+  } catch (_) { /* owner default is best-effort */ }
+
+  return { added: toAdd.length, repos: toAdd };
+}
+
+app.post('/api/internal/auto-register', async (req, res) => {
+  try {
+    const result = registerRepoPaths(await detectSessionGitRepos());
+    if (result.added > 0) {
+      console.log(`[auto-register] +${result.added}: ${result.repos.map((r) => path.basename(r)).join(', ')}`);
+      scheduleBroadcast();
+    }
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // New clients get an immediate snapshot so the page paints without waiting.
