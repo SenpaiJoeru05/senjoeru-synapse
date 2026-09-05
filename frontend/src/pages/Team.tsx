@@ -3,6 +3,7 @@ import { motion } from 'framer-motion'
 import { Users, Brain, RefreshCw, Cpu, Zap, Briefcase, GitBranch, ChevronDown } from 'lucide-react'
 import { api } from '@/lib/api'
 import { useRealtime, useTasks } from '@/lib/realtime'
+import { repoDot } from '@/lib/repo-color'
 
 interface Member {
   slug: string
@@ -54,13 +55,7 @@ const STATUS_LABEL: Record<string, string> = {
   Working: 'bg-emerald-500/20 text-emerald-300',
   Idle: 'bg-gray-700/60 text-gray-500',
 }
-const REPO_DOT: Record<string, string> = {
-  'fs-llm-service': 'bg-violet-500',
-  'fsweb': 'bg-amber-500',
-  'chat-widget': 'bg-cyan-500',
-  'cs-dashboard': 'bg-emerald-500',
-  'seller-page': 'bg-purple-500',
-}
+// Repo colour is derived from the name — see lib/repo-color.
 
 function initials(name: string): string {
   const w = name.trim().split(/\s+/)
@@ -137,7 +132,7 @@ function MemberCard({ m, live, tasks, index }: { m: Member; live: Live; tasks: T
                     <GitBranch className="w-2.5 h-2.5 text-gray-600" />
                     {task.repos!.slice(0, 2).map((r) => (
                       <span key={r.name} className="flex items-center gap-1">
-                        <span className={`w-1.5 h-1.5 rounded-full ${REPO_DOT[r.name] ?? 'bg-gray-500'}`} />
+                        <span className={`w-1.5 h-1.5 rounded-full ${repoDot(r.name)}`} />
                         <span className="text-[10px] text-gray-600 font-mono">{r.name}</span>
                       </span>
                     ))}

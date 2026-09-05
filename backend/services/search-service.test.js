@@ -15,10 +15,10 @@ function seeded() {
   const db = openDatabase(':memory:');
   const now = new Date().toISOString();
   new NotesRepository(db).insert({ title: 'Deadlock fix', body: 'roll back the txn before retry', category: 'gotcha', tags: null, now });
-  new DocIndexRepository(db).upsert({ repo: 'fsweb', rel_path: 'docs/refunds.md', title: 'Refund flow', headings: 'refund policy', size: 10, now });
+  new DocIndexRepository(db).upsert({ repo: 'web-app', rel_path: 'docs/refunds.md', title: 'Refund flow', headings: 'refund policy', size: 10, now });
   new TaskRepository(db).upsert({ id: 'pay1', title: 'Payment confirmation flow', assigned_agent: 'Miguel Santos', status: 'Working', progress: 0, priority: 'High', eta: 'x', notes: 'gcash payout', repos_json: '[]', source: 'claude-tasks', task_last_updated: now, content_hash: 'h', now });
   new AgentMemoryRepository(db).upsert({ slug: 'backend-engineer', content: 'deadlock: roll back before retry', char_count: 30, now });
-  new AnalyticsRepository(db).insertExecutionIfNew({ event_type: 'git_commit', entity_id: 'fsweb', title: 'fix deadlock retry', detail: '', dedupe_key: 'commit:fsweb:x', occurred_at: now, now });
+  new AnalyticsRepository(db).insertExecutionIfNew({ event_type: 'git_commit', entity_id: 'web-app', title: 'fix deadlock retry', detail: '', dedupe_key: 'commit:web-app:x', occurred_at: now, now });
   return new SearchService(db);
 }
 

@@ -9,6 +9,12 @@
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const path = require('node:path');
+
+// Point the whole config chain at a fixture BEFORE anything loads it. Without
+// this the graph reads whatever workspace the developer happens to have, and
+// the repo-ownership assertions below pass or fail by accident.
+process.env.SYNAPSE_CONFIG = path.join(__dirname, 'fixtures', 'workspace.config.json');
 
 const {
   buildGraph,
@@ -28,8 +34,8 @@ function repoNode(graph, label) {
 // A minimal agents fixture matching what the collector emits.
 const AGENTS = {
   agents: [
-    { name: 'AI Chatbot Engineer', status: 'Working', assignedProject: 'FlowerStorePH', activeCwd: 'd:\\FlowerStorePH\\fs-llm-service' },
-    { name: 'Backend Engineer', status: 'Idle', assignedProject: 'FlowerStorePH' },
+    { name: 'AI Chatbot Engineer', status: 'Working', assignedProject: 'acme', activeCwd: 'd:\\acme\\chat-service' },
+    { name: 'Backend Engineer', status: 'Idle', assignedProject: 'acme' },
     { name: 'Frontend Engineer', status: 'Idle' },
   ],
 };
@@ -38,14 +44,14 @@ const AGENTS = {
 
 test('normalizeRepoNames handles object-shaped repos (live schema)', () => {
   const out = normalizeRepoNames([
-    { name: 'fsweb', branch: 'main' },
-    { name: 'fs-llm-service' },
+    { name: 'web-app', branch: 'main' },
+    { name: 'chat-service' },
   ]);
-  assert.deepEqual(out, ['fsweb', 'fs-llm-service']);
+  assert.deepEqual(out, ['web-app', 'chat-service']);
 });
 
 test('normalizeRepoNames handles plain-string repos (legacy schema)', () => {
-  assert.deepEqual(normalizeRepoNames(['fsweb', 'chat-widget']), ['fsweb', 'chat-widget']);
+  assert.deepEqual(normalizeRepoNames(['web-app', 'widget']), ['web-app', 'widget']);
 });
 
 test('normalizeRepoNames drops empty/malformed entries and non-arrays', () => {
@@ -101,13 +107,13 @@ test('task with no matching agent is dropped, never crashes', async () => {
 
 test('task repos flow through in the node data (both shapes)', async () => {
   const tasks = { tasks: [
-    { id: 't1', title: 'obj repos', assignedAgent: 'AI Chatbot Engineer', repos: [{ name: 'fs-llm-service' }] },
-    { id: 't2', title: 'str repos', assignedAgent: 'AI Chatbot Engineer', repos: ['chat-widget'] },
+    { id: 't1', title: 'obj repos', assignedAgent: 'AI Chatbot Engineer', repos: [{ name: 'chat-service' }] },
+    { id: 't2', title: 'str repos', assignedAgent: 'AI Chatbot Engineer', repos: ['widget'] },
   ] };
   const graph = await buildGraph({ agentsData: AGENTS, tasksData: tasks });
   const byTitle = Object.fromEntries(agentNode(graph, 'AI Chatbot Engineer').data.tasks.map(t => [t.title, t.repos]));
-  assert.deepEqual(byTitle['obj repos'], ['fs-llm-service']);
-  assert.deepEqual(byTitle['str repos'], ['chat-widget']);
+  assert.deepEqual(byTitle['obj repos'], ['chat-service']);
+  assert.deepEqual(byTitle['str repos'], ['widget']);
 });
 
 test('agent tasks are ordered active-first, then most-recently-updated', async () => {
@@ -134,32 +140,32 @@ test('root reports the working-agent count', async () => {
 
 test('a repo owned by a working agent is marked working; edges animate', async () => {
   const graph = await buildGraph({ agentsData: AGENTS, tasksData: { tasks: [] } });
-  // AI Chatbot Engineer owns fs-llm-service and is Working.
-  assert.equal(repoNode(graph, 'fs-llm-service').data.working, true);
-  const edge = graph.edges.find(e => e.target === 'repo-fs-llm-service' && e.source === 'agent-ai-chatbot-engineer');
+  // AI Chatbot Engineer owns chat-service and is Working.
+  assert.equal(repoNode(graph, 'chat-service').data.working, true);
+  const edge = graph.edges.find(e => e.target === 'repo-chat-service' && e.source === 'agent-ai-chatbot-engineer');
   assert.ok(edge, 'expected an agent->repo edge');
   assert.equal(edge.animated, true);
 });
 
 test('a repo only lights up when its owner is active in THAT repo (bug #1)', async () => {
-  // Backend Engineer owns fsweb AND seller-page, but is working in seller-page.
+  // Backend Engineer owns web-app AND seller-portal, but is working in seller-portal.
   const agents = { agents: [
-    { name: 'Backend Engineer', status: 'Working', activeCwd: 'd:\\FlowerStorePH\\seller-page' },
+    { name: 'Backend Engineer', status: 'Working', activeCwd: 'd:\\acme\\seller-portal' },
   ] };
   const graph = await buildGraph({ agentsData: agents, tasksData: { tasks: [] } });
-  assert.equal(repoNode(graph, 'seller-page').data.working, true, 'active repo should light up');
-  assert.equal(repoNode(graph, 'fsweb').data.working, false, 'idle repo must NOT light up');
+  assert.equal(repoNode(graph, 'seller-portal').data.working, true, 'active repo should light up');
+  assert.equal(repoNode(graph, 'web-app').data.working, false, 'idle repo must NOT light up');
 
-  const sellerEdge = graph.edges.find(e => e.target === 'repo-seller-page' && e.source === 'agent-backend-engineer');
-  const fswebEdge  = graph.edges.find(e => e.target === 'repo-fsweb' && e.source === 'agent-backend-engineer');
+  const sellerEdge = graph.edges.find(e => e.target === 'repo-seller-portal' && e.source === 'agent-backend-engineer');
+  const webAppEdge  = graph.edges.find(e => e.target === 'repo-web-app' && e.source === 'agent-backend-engineer');
   assert.equal(sellerEdge.animated, true);
-  assert.equal(fswebEdge.animated, false);
+  assert.equal(webAppEdge.animated, false);
 })
 
 test('a working agent with no matching repo cwd lights up no repo', async () => {
   // Active at the workspace root, not in a specific repo.
   const agents = { agents: [
-    { name: 'Backend Engineer', status: 'Working', activeCwd: 'd:\\FlowerStorePH' },
+    { name: 'Backend Engineer', status: 'Working', activeCwd: 'd:\\acme' },
   ] };
   const graph = await buildGraph({ agentsData: agents, tasksData: { tasks: [] } });
   assert.equal(graph.nodes.filter(n => n.type === 'repo' && n.data.working).length, 0);
@@ -177,4 +183,52 @@ test('degrades to a root-only-ish graph on empty input, never throws', async () 
   const graph = await buildGraph({ agentsData: { agents: [] }, tasksData: { tasks: [] } });
   assert.ok(graph.nodes.find(n => n.type === 'root'));
   assert.equal(graph.nodes.filter(n => n.type === 'agent').length, 0);
+});
+
+/* ── projects tier ─────────────────────────────────────────────────── */
+
+test('repos are contained by their project, and agents still own them', async () => {
+  const graph = await buildGraph({ agentsData: AGENTS, tasksData: { tasks: [] } });
+
+  const projects = graph.nodes.filter(n => n.type === 'project');
+  assert.ok(projects.length >= 1, 'expected at least one project node');
+
+  // Every repo belongs to exactly one project, via a containment edge.
+  for (const repo of graph.nodes.filter(n => n.type === 'repo')) {
+    const containment = graph.edges.filter(
+      e => e.target === repo.id && e.data && e.data.containment,
+    );
+    assert.equal(containment.length, 1, `${repo.data.label} needs exactly one project`);
+    assert.equal(containment[0].source, repo.data.project);
+  }
+
+  // Containment must not have replaced ownership: an agent that owns a repo
+  // still has its own edge to it. Agents span projects, so the two are
+  // different relationships and both have to survive.
+  const owned = graph.nodes.find(n => n.type === 'repo' && (n.data.owners || []).length);
+  if (owned) {
+    const ownership = graph.edges.filter(
+      e => e.target === owned.id && !(e.data && e.data.containment),
+    );
+    assert.ok(ownership.length >= 1, `${owned.data.label} lost its owning-agent edge`);
+  }
+});
+
+test('every project node is laid out clear of its neighbours', async () => {
+  const graph = await buildLaidOutGraph({ agentsData: AGENTS, tasksData: { tasks: [] } });
+  const projects = graph.nodes.filter(n => n.type === 'project');
+
+  for (const p of projects) assert.equal(typeof p.position.x, 'number');
+
+  const xs = projects.map(p => p.position.x).sort((a, b) => a - b);
+  for (let i = 1; i < xs.length; i++) {
+    assert.ok(xs[i] - xs[i - 1] > 0, 'two projects share a column');
+  }
+
+  // Repos sit below their project, never above it.
+  const byId = Object.fromEntries(projects.map(p => [p.id, p]));
+  for (const repo of graph.nodes.filter(n => n.type === 'repo' && n.data.project)) {
+    assert.ok(repo.position.y > byId[repo.data.project].position.y,
+      `${repo.data.label} is not below its project`);
+  }
 });

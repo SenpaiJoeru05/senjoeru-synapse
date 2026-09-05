@@ -2,7 +2,8 @@
  * Agent-Network graph builder.
  *
  * Transforms the metrics JSON produced by the collector into a React Flow
- * graph: FlowerStorePH (root) -> Agents -> Repos.
+ * graph: Workspace (root) -> Projects -> Repos, with Agents edged to the repos
+ * they own.
  *
  * Two independent stages (kept separate so layout can be swapped later):
  *   buildGraph()        -> { nodes, edges }  — topology + data, NO positions
@@ -21,11 +22,17 @@ const METRICS_DIR = path.join(__dirname, '../../metrics');
 const ROOT_ID = 'root';
 
 /* ── layout constants ──────────────────────────────────────────────── */
+// Four tiers. Repos hang beneath the PROJECT that contains them, not beneath
+// an agent — an agent typically works across several projects, so nesting
+// repos under agents made one project look like the parent of everything.
+// Agents sit between, with edges crossing down to whichever repos they own.
 const ROOT_Y = 0;
-const AGENT_Y = 240;
-const REPO_Y = 500;
-const AGENT_GAP = 320; // horizontal spacing between agents
-const REPO_GAP = 180;  // horizontal spacing between repos under one agent
+const PROJECT_Y = 200;
+const AGENT_Y = 430;
+const REPO_Y = 680;
+const PROJECT_GAP = 460; // horizontal spacing between projects
+const AGENT_GAP = 320;   // horizontal spacing between agents
+const REPO_GAP = 180;    // horizontal spacing between repos under one project
 
 /* ── helpers ───────────────────────────────────────────────────────── */
 
@@ -34,6 +41,10 @@ function slug(str) {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '');
+}
+
+function projectNodeId(name) {
+  return `project-${slug(name)}`;
 }
 
 function agentNodeId(name) {
@@ -147,6 +158,37 @@ async function buildGraph(preloaded) {
     },
   });
 
+  // Projects --------------------------------------------------------------
+  // One node per configured project, holding the repos it contains. With no
+  // `projects` in config this is a single node named after the workspace, so
+  // the graph looks exactly as it did before.
+  const projects = getConfig().projects || [];
+  const projectIdByRepo = {};
+  for (const project of projects) {
+    const id = projectNodeId(project.name);
+    const owned = project.repositories.filter(r => ALL_REPOS.includes(r));
+    for (const repo of owned) projectIdByRepo[repo] = id;
+
+    nodes.push({
+      id,
+      type: 'project',
+      data: {
+        label: project.name,
+        emoji: project.emoji || '',
+        root: project.root || '',
+        repoCount: owned.length,
+      },
+    });
+
+    edges.push({
+      id: `e-${ROOT_ID}-${id}`,
+      source: ROOT_ID,
+      target: id,
+      data: { containment: true },
+      markerEnd: { type: 'arrowclosed' },
+    });
+  }
+
   // Agents ----------------------------------------------------------------
   // The specific cwd each working agent is active in — used to light up only
   // the repo it is genuinely working in (see the repo loop below).
@@ -198,7 +240,7 @@ async function buildGraph(preloaded) {
     const presentOwners = owners.filter(o => agentIdByName[o]);
     // A repo is "working" only when an owning agent is ACTUALLY active in this
     // repo's directory — not merely working somewhere else. This stops e.g.
-    // Backend Engineer lighting up fsweb while it is really editing seller-page.
+    // one repo lighting up while its owning agent is really editing another.
     const repoWorking = presentOwners.some(o => cwdMatchesRepo(activeCwdByAgent[o], repo));
     const id = repoNodeId(repo);
 
@@ -209,8 +251,22 @@ async function buildGraph(preloaded) {
         label: repo,
         working: repoWorking,
         owners: presentOwners,
+        project: projectIdByRepo[repo] || null,
       },
     });
+
+    // Containment: which project this repo belongs to. Distinct from the
+    // ownership edges below, which say who works in it.
+    const projectId = projectIdByRepo[repo];
+    if (projectId) {
+      edges.push({
+        id: `e-${projectId}-${id}`,
+        source: projectId,
+        target: id,
+        data: { containment: true },
+        markerEnd: { type: 'arrowclosed' },
+      });
+    }
 
     for (const owner of presentOwners) {
       const agentId = agentIdByName[owner];
@@ -237,49 +293,52 @@ function layoutGraph(graph) {
 
   const agents = nodes.filter(n => n.type === 'agent');
   const repos = nodes.filter(n => n.type === 'repo');
+  const projectNodes = nodes.filter(n => n.type === 'project');
   const root = nodes.find(n => n.type === 'root');
-
-  // Agents in a centered horizontal row.
-  const n = agents.length;
-  const agentSpan = (n - 1) * AGENT_GAP;
-  const agentStartX = -agentSpan / 2;
-  const agentXById = {};
-  agents.forEach((a, i) => {
-    a.position = { x: agentStartX + i * AGENT_GAP, y: AGENT_Y };
-    agentXById[a.id] = a.position.x;
-  });
 
   if (root) root.position = { x: 0, y: ROOT_Y };
 
-  // Assign each repo to one layout-parent agent = its first present owner,
-  // then cluster that agent's repos centered beneath it.
-  const reposByParent = {};   // parentAgentId -> [repoNode]
+  // Projects in a centered row, each wide enough for the repos beneath it, so
+  // a project with six repos doesn't overlap its neighbour.
+  const reposByProject = {};
   const orphanRepos = [];
   for (const repo of repos) {
-    const owners = repo.data.owners || [];
-    const parentName = owners[0];
-    const parentId = parentName ? agentNodeId(parentName) : null;
-    if (parentId && agentXById[parentId] !== undefined) {
-      (reposByParent[parentId] ||= []).push(repo);
-    } else {
-      orphanRepos.push(repo);
-    }
+    const pid = repo.data.project;
+    if (pid) (reposByProject[pid] ||= []).push(repo);
+    else orphanRepos.push(repo);
   }
 
-  for (const [parentId, group] of Object.entries(reposByParent)) {
-    const parentX = agentXById[parentId];
+  const widthOf = p => Math.max(PROJECT_GAP, ((reposByProject[p.id] || []).length) * REPO_GAP);
+  const totalWidth = projectNodes.reduce((sum, p) => sum + widthOf(p), 0);
+
+  let cursor = -totalWidth / 2;
+  for (const project of projectNodes) {
+    const width = widthOf(project);
+    const centerX = cursor + width / 2;
+    project.position = { x: centerX, y: PROJECT_Y };
+    cursor += width;
+
+    // Its repos, centered beneath it.
+    const group = reposByProject[project.id] || [];
     const span = (group.length - 1) * REPO_GAP;
-    const startX = parentX - span / 2;
     group.forEach((repo, i) => {
-      repo.position = { x: startX + i * REPO_GAP, y: REPO_Y };
+      repo.position = { x: centerX - span / 2 + i * REPO_GAP, y: REPO_Y };
     });
   }
 
-  // Any repo whose owner agent isn't present: lay out in a centered row.
-  const span = (orphanRepos.length - 1) * REPO_GAP;
-  const startX = -span / 2;
+  // A repo belonging to no project still needs a position — off to the right
+  // of everything rather than stacked at the origin.
+  const orphanSpan = (orphanRepos.length - 1) * REPO_GAP;
+  const orphanStart = totalWidth / 2 + REPO_GAP;
   orphanRepos.forEach((repo, i) => {
-    repo.position = { x: startX + i * REPO_GAP, y: REPO_Y };
+    repo.position = { x: orphanStart + i * REPO_GAP - orphanSpan / 2, y: REPO_Y };
+  });
+
+  // Agents in a centered row between projects and repos. They span projects,
+  // so they belong to no single column.
+  const agentSpan = (agents.length - 1) * AGENT_GAP;
+  agents.forEach((a, i) => {
+    a.position = { x: -agentSpan / 2 + i * AGENT_GAP, y: AGENT_Y };
   });
 
   return { nodes, edges };

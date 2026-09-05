@@ -10,12 +10,13 @@ import { Wifi, WifiOff, RotateCcw } from 'lucide-react'
 import { useAgentNetwork } from '@/lib/useAgentNetwork'
 import type { NetworkEdge, NetworkNode } from '@/lib/network-types'
 import RootNode from '@/components/network/RootNode'
+import ProjectNode from '@/components/network/ProjectNode'
 import AgentNode from '@/components/network/AgentNode'
 import RepoNode from '@/components/network/RepoNode'
 import ActivityFeed from '@/components/network/ActivityFeed'
 import NodeInspector from '@/components/network/NodeInspector'
 
-const nodeTypes: NodeTypes = { root: RootNode, agent: AgentNode, repo: RepoNode }
+const nodeTypes: NodeTypes = { root: RootNode, project: ProjectNode, agent: AgentNode, repo: RepoNode }
 
 // Node layout is presentation state (per ARCHITECTURE-V2) → persisted in the
 // browser, not the backend DB. Survives tab navigation AND app restarts.
@@ -117,6 +118,7 @@ function AgentNetworkInner() {
     return {
       agents: agents.length,
       working: agents.filter((n) => (n.data as { working?: boolean }).working).length,
+      projects: nodes.filter((n) => n.type === 'project').length,
       repos: nodes.filter((n) => n.type === 'repo').length,
     }
   }, [nodes])
@@ -160,6 +162,7 @@ function AgentNetworkInner() {
         {/* Stats */}
         <div className="absolute left-1/2 top-4 z-10 flex -translate-x-1/2 gap-2">
           {[
+            { label: 'Projects', value: stats.projects, color: '#a78bfa' },
             { label: 'Agents', value: stats.agents, color: '#94a3b8' },
             { label: 'Working', value: stats.working, color: '#22d3ee' },
             { label: 'Repos', value: stats.repos, color: '#a855f7' },

@@ -30,7 +30,10 @@ interface Config {
 }
 
 const DEFAULTS: Config = {
-  claudeDir: 'C:\\Users\\joelr\\.claude',
+  // Empty, not a path: the backend resolves the real default from the running
+  // user's home. Shipping one machine's absolute path here showed every other
+  // user a directory that does not exist on their computer.
+  claudeDir: '',
   pollInterval: 30,
   monitorClaudeDir: true,
   repositories: [],

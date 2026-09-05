@@ -19,7 +19,13 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const CONFIG_PATH = path.join(__dirname, '..', 'metrics', 'config.json');
+const REPO_ROOT = path.join(__dirname, '..');
+
+// SYNAPSE_CONFIG points the whole app at a different config file. Needed so
+// tests can supply a fixture instead of reading whatever happens to be on the
+// developer's machine — two graph tests used to pass only because the author's
+// config named the repos they asserted on.
+const CONFIG_PATH = process.env.SYNAPSE_CONFIG || path.join(REPO_ROOT, 'metrics', 'config.json');
 
 // Pricing per MILLION tokens (config units); Claude Sonnet 4.6 defaults.
 const DEFAULT_PRICING = { modelLabel: 'Sonnet 4.6', input: 3.0, output: 15.0, cacheRead: 0.3, cacheWrite: 3.75 };
@@ -39,6 +45,19 @@ function slugify(s) {
 
 function basename(p) {
   return String(p || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop() || '';
+}
+
+/**
+ * Parent directory, for either separator.
+ *
+ * `path.dirname` only understands the host's separator, so a Windows path read
+ * on Linux — a config written on one machine, or a test running in CI — yields
+ * "." and every repo collapses into one group.
+ */
+function dirname(p) {
+  const parts = String(p || '').replace(/[\\/]+$/, '').split(/[\\/]/);
+  parts.pop();
+  return parts.join('/');
 }
 
 /** "ai-chatbot-engineer" → "AI Chatbot Engineer" (generic, acronym-aware). */
@@ -77,6 +96,19 @@ function resolveOpencodeDir(raw) {
   if (v) return v;
   if (process.env.SYNAPSE_OPENCODE_DIR) return process.env.SYNAPSE_OPENCODE_DIR;
   return path.join(os.homedir(), '.local', 'share', 'opencode');
+}
+
+// The task board is Synapse's own format, not Claude Code's — Claude has no
+// native concept of one. It used to default to ~/.claude/tasks.json, which put
+// Synapse's data inside another tool's directory purely because that is where
+// the agents writing it were first told to look. It now defaults beside the
+// SQLite database instead: data/ is this app's own store, gitignored, and the
+// agents are pointed at it by joeru-kit.
+function resolveTasksFile(raw) {
+  const v = raw && typeof raw.tasksFile === 'string' ? raw.tasksFile.trim() : '';
+  if (v) return v;
+  if (process.env.SYNAPSE_TASKS_FILE) return process.env.SYNAPSE_TASKS_FILE;
+  return path.join(REPO_ROOT, 'data', 'tasks.json');
 }
 
 // joeru-kit — the portable roster + memory the assistant reads and writes.
@@ -142,6 +174,33 @@ function getConfig() {
 
   const agentRoles = raw.agentRoles && typeof raw.agentRoles === 'object' ? raw.agentRoles : {};
 
+  // Projects group repos so the graph can say "these are my projects" rather
+  // than implying one of them owns everything.
+  //
+  // Declaring them is optional. With none configured they are derived from each
+  // repo's parent directory, because that is already how people organise work
+  // on disk — `~/work/acme/api` and `~/work/acme/web` are obviously one project.
+  // A new user therefore gets sensible grouping with no configuration, and it
+  // keeps up on its own as repos are added.
+  const declaredProjects = Array.isArray(raw.projects) ? raw.projects : [];
+  const projects = declaredProjects.length
+    ? declaredProjects
+        .filter((p) => p && typeof p === 'object' && p.name)
+        .map((p) => ({
+          name: p.name,
+          emoji: p.emoji || '',
+          root: p.root || '',
+          repositories: Array.isArray(p.repositories) ? p.repositories : [],
+        }))
+    : deriveProjects(repoPaths, wsName, w.emoji || '');
+
+  // A repo named by no project still has to appear somewhere, so it falls to
+  // the first — silently dropping it from the graph would be worse than
+  // filing it imperfectly.
+  const claimed = new Set(projects.flatMap((p) => p.repositories));
+  const unclaimed = repoPaths.map(basename).filter((r) => !claimed.has(r));
+  if (unclaimed.length && projects.length) projects[0].repositories.push(...unclaimed);
+
   const pm = { ...DEFAULT_PRICING, ...(raw.pricing || {}) };
   const pricing = {
     modelLabel: pm.modelLabel,
@@ -162,7 +221,7 @@ function getConfig() {
       projectsDir: path.join(claudeDir, 'projects'),
       sessionsDir: path.join(claudeDir, 'sessions'),
       agentsDir: path.join(claudeDir, 'agents'),
-      tasksFile: path.join(claudeDir, 'tasks.json'),
+      tasksFile: resolveTasksFile(raw),
       opencodeDir,
       opencodeStorageDir: path.join(opencodeDir, 'storage'),
       joeruKitDir,
@@ -170,12 +229,47 @@ function getConfig() {
     },
     opencodeServerUrl: resolveOpencodeServerUrl(raw),
     workspace,
+    projects,
     repoPaths,
     repoAgents,
     agentRoles,
     pricing,
     locale: raw.locale || 'en-US',
   };
+}
+
+/**
+ * Group repos by the folder that contains them.
+ *
+ * Falls back to a single workspace-named project when there is nothing to group
+ * — no repos yet on a fresh install, or every repo sitting in one directory, in
+ * which case a tier of one adds nothing.
+ */
+function deriveProjects(repoPaths, wsName, wsEmoji) {
+  const byParent = new Map();
+  for (const p of repoPaths) {
+    const parent = dirname(p);
+    if (!byParent.has(parent)) byParent.set(parent, []);
+    byParent.get(parent).push(basename(p));
+  }
+
+  if (byParent.size < 2) {
+    return [{
+      name: wsName,
+      emoji: wsEmoji,
+      root: [...byParent.keys()][0] || '',
+      repositories: repoPaths.map(basename),
+    }];
+  }
+
+  return [...byParent.entries()]
+    .map(([root, repositories]) => ({
+      name: basename(root) || root,
+      emoji: '',
+      root,
+      repositories,
+    }))
+    .sort((a, b) => b.repositories.length - a.repositories.length);
 }
 
 /** Display name for an agent slug — config override wins, else derived. */
@@ -194,4 +288,7 @@ function allRepoNames() {
   return [...set];
 }
 
-module.exports = { getConfig, slugify, basename, formatAgentName, roleDisplayName, allRepoNames, CONFIG_PATH };
+module.exports = {
+  getConfig, slugify, basename, formatAgentName, roleDisplayName, allRepoNames,
+  deriveProjects, CONFIG_PATH,
+};

@@ -8,6 +8,14 @@ backend/.env
 collectors/.env
 metrics/*.json
 !metrics/.gitkeep
+# The example config must ship — it is the only setup guidance a new clone gets.
+!metrics/config.example.json
+
+# The task board your agents write. Local user data, like the database below.
+# Ignore the contents, not the directory — git cannot un-ignore a file inside
+# an ignored directory, so `data/` would swallow the .gitkeep too.
+data/*
+!data/.gitkeep
 
 # SQLite application database (permanent local data — never committed)
 backend/data/

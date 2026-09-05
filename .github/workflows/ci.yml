@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Node 22 is a hard requirement, not a preference: the OpenCode collector
+      # uses the built-in node:sqlite, which landed in 22.5.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install
+        run: npm install
+
+      # The app must run for someone who has never configured it. Building
+      # without a config.json is the closest thing to a fresh-clone test.
+      - name: Typecheck frontend
+        run: npx tsc --noEmit
+        working-directory: frontend
+
+      - name: Build frontend
+        run: npm run build
+        working-directory: frontend
+
+      - name: Backend tests
+        run: node --test services/*.test.js lib/*.test.js
+        working-directory: backend
+
+      - name: Example config is valid
+        run: node -e "require('./metrics/config.example.json')"
+
+      # A shipped example nobody can copy is worse than none — this is exactly
+      # the failure that hid it from fresh clones for months.
+      - name: Example config is not gitignored
+        run: git ls-files --error-unmatch metrics/config.example.json

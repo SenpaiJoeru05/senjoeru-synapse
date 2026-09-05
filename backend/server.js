@@ -147,7 +147,11 @@ try {
   intelligenceService = new IntelligenceService(db, METRICS_DIR);
 
   // Team view (Phase 4): personas + memory read live from .claude/agents.
-  teamService = new TeamService(path.join(CLAUDE_DIR, 'agents'), new AgentMemoryRepository(db));
+  teamService = new TeamService(
+    path.join(CLAUDE_DIR, 'agents'),
+    new AgentMemoryRepository(db),
+    path.join(getWorkspaceConfig().paths.memoryDir, 'agents'),
+  );
   teamService.syncMemory(); // store a permanent copy of agent memory
 
   // Knowledge Layer (Phase 4): notes, bookmarks, docs index, FTS5 search.

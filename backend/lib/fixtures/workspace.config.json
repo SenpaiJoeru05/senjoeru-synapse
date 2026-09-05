@@ -1,0 +1,30 @@
+{
+  "_comment": "Fixture workspace for tests. Deliberately not the author's real setup — tests that read the developer's own config pass or fail by accident, which is how two graph tests came to depend on repos only one machine had.",
+
+  "workspace": { "name": "Test Workspace", "root": "/w", "emoji": "🧪" },
+
+  "repositories": [
+    "/w/acme/web-app",
+    "/w/acme/chat-service",
+    "/w/acme/seller-portal",
+    "/w/acme/dashboard",
+    "/w/acme/widget",
+    "/w/personal/notes-app"
+  ],
+
+  "projects": [
+    { "name": "Acme", "emoji": "🏢", "root": "/w/acme",
+      "repositories": ["web-app", "chat-service", "seller-portal", "dashboard", "widget"] },
+    { "name": "Personal", "emoji": "🧪", "root": "/w/personal",
+      "repositories": ["notes-app"] }
+  ],
+
+  "repoAgents": {
+    "web-app": ["backend-engineer"],
+    "seller-portal": ["backend-engineer"],
+    "chat-service": ["ai-chatbot-engineer"],
+    "dashboard": ["frontend-engineer"],
+    "widget": ["frontend-engineer"],
+    "notes-app": ["frontend-engineer"]
+  }
+}

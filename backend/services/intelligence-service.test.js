@@ -4,6 +4,10 @@
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
+// Repo enumeration comes from the workspace config, so these assertions need a
+// fixture rather than whatever workspace the developer happens to have.
+process.env.SYNAPSE_CONFIG =
+  require('node:path').join(__dirname, '..', 'lib', 'fixtures', 'workspace.config.json');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -35,9 +39,9 @@ function setup(agentsJson) {
   task('fail1', 'Failed', now, 'h2');                      // blocked
   task('stale1', 'Pending', '2026-06-01T00:00:00Z', 'h3'); // stalled (old)
 
-  // commits: one today (fs-llm-service), one old
-  analytics.insertExecutionIfNew({ event_type: 'git_commit', entity_id: 'fs-llm-service', title: 'c', detail: '', dedupe_key: 'commit:fs-llm-service:aaa', occurred_at: '2026-07-27T09:00:00+00:00', now });
-  analytics.insertExecutionIfNew({ event_type: 'git_commit', entity_id: 'cs-dashboard', title: 'c', detail: '', dedupe_key: 'commit:cs-dashboard:bbb', occurred_at: '2026-07-10T00:00:00+00:00', now });
+  // commits: one today (chat-service), one old
+  analytics.insertExecutionIfNew({ event_type: 'git_commit', entity_id: 'chat-service', title: 'c', detail: '', dedupe_key: 'commit:chat-service:aaa', occurred_at: '2026-07-27T09:00:00+00:00', now });
+  analytics.insertExecutionIfNew({ event_type: 'git_commit', entity_id: 'dashboard', title: 'c', detail: '', dedupe_key: 'commit:dashboard:bbb', occurred_at: '2026-07-10T00:00:00+00:00', now });
   // a task completed today
   analytics.insertExecutionIfNew({ event_type: 'task_completed', entity_id: 'done1', title: 'Done One', detail: '', dedupe_key: 'task:done1:x', occurred_at: '2026-07-27T08:00:00+00:00', now });
 
@@ -48,8 +52,8 @@ test('today recap counts commits + completions for the given day only', () => {
   const { svc } = setup();
   const s = svc.summary(NOW);
   assert.equal(s.today.date, TODAY);
-  assert.equal(s.today.commits.total, 1);                       // only the fs-llm commit is today
-  assert.equal(s.today.commits.byRepo[0].repo, 'fs-llm-service');
+  assert.equal(s.today.commits.total, 1);                       // only the chat-svc commit is today
+  assert.equal(s.today.commits.byRepo[0].repo, 'chat-service');
   assert.equal(s.today.tasksCompleted.length, 1);
   assert.equal(s.today.tasksCompleted[0].id, 'done1');
 });
@@ -65,14 +69,14 @@ test('active/blocked classification', () => {
 test('repo activity state from last commit', () => {
   const { svc } = setup();
   const byRepo = Object.fromEntries(svc.summary(NOW).repos.map((r) => [r.repo, r]));
-  assert.equal(byRepo['fs-llm-service'].state, 'active');      // committed today
-  assert.equal(byRepo['cs-dashboard'].state, 'quiet');        // 17 days ago (>7, <30)
-  assert.equal(byRepo['fsweb'].state, 'no-data');             // never
+  assert.equal(byRepo['chat-service'].state, 'active');      // committed today
+  assert.equal(byRepo['dashboard'].state, 'quiet');        // 17 days ago (>7, <30)
+  assert.equal(byRepo['web-app'].state, 'no-data');             // never
 });
 
 test('working agents come from agents.json when present', () => {
   const { svc } = setup({ agents: [
-    { name: 'Backend Engineer', displayName: 'Miguel Santos', title: 'Senior Backend Engineer', status: 'Working', activeCwd: 'd:/x/fsweb' },
+    { name: 'Backend Engineer', displayName: 'Miguel Santos', title: 'Senior Backend Engineer', status: 'Working', activeCwd: 'd:/x/web-app' },
     { name: 'QA Engineer', status: 'Idle' },
   ] });
   const s = svc.summary(NOW);

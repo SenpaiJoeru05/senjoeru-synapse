@@ -4,6 +4,12 @@
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const path = require('node:path');
+
+// repoHealth enumerates repos from the workspace config, so without a fixture
+// these assertions only hold on a machine whose config happens to name them.
+process.env.SYNAPSE_CONFIG = path.join(__dirname, '..', 'lib', 'fixtures', 'workspace.config.json');
+
 const { openDatabase } = require('../lib/db');
 const { AnalyticsRepository } = require('../repositories/analytics-repository');
 const { ObservationRepository } = require('../repositories/observation-repository');
@@ -17,17 +23,17 @@ function seeded() {
   const o = new ObservationRepository(db);
   const now = NOW.toISOString();
 
-  a.insertExecutionIfNew({ event_type: 'git_commit', entity_id: 'fs-llm-service', title: 'c', detail: '', dedupe_key: 'commit:fs-llm-service:x', occurred_at: '2026-07-27T09:00:00+00:00', now });
+  a.insertExecutionIfNew({ event_type: 'git_commit', entity_id: 'chat-service', title: 'c', detail: '', dedupe_key: 'commit:chat-service:x', occurred_at: '2026-07-27T09:00:00+00:00', now });
   a.insertExecutionIfNew({ event_type: 'task_completed', entity_id: 't1', title: 'done', detail: '', dedupe_key: 'task:t1:x', occurred_at: '2026-07-26T09:00:00+00:00', now });
   a.insertExecutionIfNew({ event_type: 'task_completed', entity_id: 't2', title: 'done', detail: '', dedupe_key: 'task:t2:x', occurred_at: '2026-07-25T09:00:00+00:00', now });
   a.upsertTokenDay({ bucket_date: '2026-07-27', tokens: 1000, cost: 2.5, now });
 
   // one ended session (30 min) + one still active
   const t0 = '2026-07-27T08:00:00.000Z', t1 = '2026-07-27T08:30:00.000Z';
-  o.upsertSession({ session_id: 's1', pid: 1, cwd: 'd:/x/fsweb', repo: 'fsweb', kind: 'i', version: '1', started_at: '1', now: t0 });
-  o.upsertSession({ session_id: 's1', pid: 1, cwd: 'd:/x/fsweb', repo: 'fsweb', kind: 'i', version: '1', started_at: '1', now: t1 });
+  o.upsertSession({ session_id: 's1', pid: 1, cwd: 'd:/x/web-app', repo: 'web-app', kind: 'i', version: '1', started_at: '1', now: t0 });
+  o.upsertSession({ session_id: 's1', pid: 1, cwd: 'd:/x/web-app', repo: 'web-app', kind: 'i', version: '1', started_at: '1', now: t1 });
   o.markSessionEnded('s1', t1);
-  o.upsertSession({ session_id: 's2', pid: 2, cwd: 'd:/x/fs-llm', repo: 'fs-llm', kind: 'i', version: '1', started_at: '1', now });
+  o.upsertSession({ session_id: 's2', pid: 2, cwd: 'd:/x/chat-svc', repo: 'chat-svc', kind: 'i', version: '1', started_at: '1', now });
 
   return new InsightsService(db);
 }
@@ -41,7 +47,7 @@ test('velocity: zero-filled series + totals', () => {
 
 test('repo health reflects commit counts', () => {
   const s = seeded().summary(NOW, 30);
-  const fsllm = s.repoHealth.find((r) => r.repo === 'fs-llm-service');
+  const fsllm = s.repoHealth.find((r) => r.repo === 'chat-service');
   assert.equal(fsllm.commits, 1);
   assert.equal(fsllm.daysSince, 0);
 });

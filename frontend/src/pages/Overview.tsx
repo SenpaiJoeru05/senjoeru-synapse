@@ -5,6 +5,7 @@ import StatCard from '@/components/StatCard'
 import NotificationBell from '@/components/NotificationBell'
 import { api } from '@/lib/api'
 import { useRealtime, useTasks } from '@/lib/realtime'
+import { repoBadge } from '@/lib/repo-color'
 import { formatBytes, formatNumber } from '@/lib/utils'
 import {
   Bot, ListTodo, Coins, Clock, Activity, Cpu, DollarSign,
@@ -43,13 +44,7 @@ const STATUS_TEXT: Record<string, string> = {
 const AGENT_ORDER: Record<string, number> = {
   Working: 0, Reviewing: 1, Testing: 2, Idle: 3, Error: 4,
 }
-const REPO_BADGE: Record<string, string> = {
-  'fs-llm-service': 'bg-violet-500/20 text-violet-300',
-  'cs-dashboard':   'bg-emerald-500/20 text-emerald-300',
-  'chat-widget':    'bg-cyan-500/20 text-cyan-300',
-  'fsweb':          'bg-amber-500/20 text-amber-300',
-  'seller-page':    'bg-purple-500/20 text-purple-300',
-}
+// Repo colour is derived from the name — see lib/repo-color.
 
 function relativeTime(iso: string): string {
   const ms = Date.now() - new Date(iso).getTime()
@@ -477,7 +472,7 @@ export default function Overview() {
                   <div className="flex flex-col items-end gap-1 shrink-0">
                     <span className="text-[11px] text-gray-500 whitespace-nowrap">{relativeTime(event.timestamp)}</span>
                     {event.repo && (
-                      <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono ${REPO_BADGE[event.repo] ?? 'bg-gray-500/20 text-gray-400'}`}>
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono ${repoBadge(event.repo)}`}>
                         {event.repo}
                       </span>
                     )}

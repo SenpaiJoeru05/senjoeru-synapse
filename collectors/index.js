@@ -343,7 +343,10 @@ function deriveProgress(body) {
   return 50;
 }
 
-const CLAUDE_TASKS_FILE = path.join(CLAUDE_DIR, 'tasks.json');
+// The board is Synapse's own file, not Claude's — follow config rather than
+// assuming it sits under the Claude directory. Hardcoding this meant the
+// watcher kept polling the old location after the path became configurable.
+const CLAUDE_TASKS_FILE = _cfg.paths.tasksFile;
 
 // Valid JSON string escapes. Agents occasionally paste code (e.g. PHP `$queue`
 // as `\$queue`) into task notes, producing invalid escapes that break the whole
@@ -386,7 +389,7 @@ async function readTasksBoardLenient() {
 }
 
 async function collectTasks() {
-  // Priority 1: C:\Users\joelr\.claude\tasks.json — live file updated by Claude agents
+  // Priority 1: the configured task board — the live file agents write to
   if (fs.existsSync(CLAUDE_TASKS_FILE)) {
     const source = await readTasksBoardLenient();
     if (source) {
@@ -460,7 +463,7 @@ async function collectTasks() {
   console.log(`[tasks] loaded=${tasks.length} from memory files (fallback)`);
 }
 
-// ─── agent collector (from C:\Users\joelr\.claude\agents\*.md definitions) ────
+// ─── agent collector (from <claudeDir>/agents/*.md definitions) ──────────────
 
 function relativeTime(ms) {
   const diff = Date.now() - ms;
@@ -503,7 +506,7 @@ function inferProject(description) {
 const ACTIVE_THRESHOLD_MS = 10 * 60 * 1000; // 10 minutes
 
 // Convert a CWD path to the Claude project directory name.
-// "d:\FlowerStorePH\fs-llm-service"  →  "d--FlowerStorePH-fs-llm-service"
+// "d:\work\my-api"  →  "d--work-my-api"
 function cwdToProjectDirName(cwd) {
   return cwd
     .replace(/^([a-zA-Z]):[\\\/]/, (_, letter) => letter + '--')

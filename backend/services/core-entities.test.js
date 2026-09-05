@@ -51,7 +51,7 @@ test('duplicate workspace name is rejected', () => {
 test('project is created under a workspace and archived', () => {
   const { workspaces, projects } = services();
   const ws = workspaces.ensureDefault();
-  const p = projects.create({ workspaceId: ws.id, name: 'FlowerStorePH', description: 'CS platform' });
+  const p = projects.create({ workspaceId: ws.id, name: 'acme', description: 'CS platform' });
   assert.equal(p.status, 'active');
   assert.equal(projects.listByWorkspace(ws.id).length, 1);
   const archived = projects.archive(p.id);
@@ -70,10 +70,10 @@ test('project requires a name and workspaceId', () => {
 test('register is idempotent by name+path (updates, never duplicates)', () => {
   const { workspaces, projects, repos } = services();
   const ws = workspaces.ensureDefault();
-  const p = projects.create({ workspaceId: ws.id, name: 'FlowerStorePH' });
+  const p = projects.create({ workspaceId: ws.id, name: 'acme' });
 
-  const r1 = repos.register({ projectId: p.id, name: 'fs-llm-service', path: 'd:/FlowerStorePH/fs-llm-service', branch: 'dev' });
-  const r2 = repos.register({ projectId: p.id, name: 'fs-llm-service', path: 'd:/FlowerStorePH/fs-llm-service', branch: 'main' });
+  const r1 = repos.register({ projectId: p.id, name: 'chat-service', path: 'd:/acme/chat-service', branch: 'dev' });
+  const r2 = repos.register({ projectId: p.id, name: 'chat-service', path: 'd:/acme/chat-service', branch: 'main' });
   assert.equal(r1.id, r2.id);              // same row
   assert.equal(r2.branch, 'main');         // updated
   assert.equal(repos.listByProject(p.id).length, 1);

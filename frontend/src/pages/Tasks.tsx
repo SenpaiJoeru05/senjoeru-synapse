@@ -5,6 +5,7 @@ import {
   ChevronDown, ChevronUp, Filter, RefreshCw
 } from 'lucide-react'
 import { useRealtime, useTasks } from '@/lib/realtime'
+import { repoPill, repoDot } from '@/lib/repo-color'
 
 interface TaskRepo {
   name: string
@@ -84,29 +85,8 @@ const PRIORITY_COLORS = {
   Low:    'bg-gray-500/20 text-gray-400',
 }
 
-const REPO_COLORS: Record<string, string> = {
-  'fs-llm-service': 'bg-primary/20 text-primary border-primary/30',
-  'fsweb':          'bg-warning/20 text-warning border-warning/30',
-  'chat-widget':    'bg-accent/20 text-accent border-accent/30',
-  'cs-dashboard':   'bg-success/20 text-success border-success/30',
-  'seller-page':    'bg-purple-500/20 text-purple-400 border-purple-500/30',
-}
-
-const REPO_DOT: Record<string, string> = {
-  'fs-llm-service': 'bg-primary',
-  'fsweb':          'bg-warning',
-  'chat-widget':    'bg-accent',
-  'cs-dashboard':   'bg-success',
-  'seller-page':    'bg-purple-400',
-}
-
-function repoColor(name: string) {
-  return REPO_COLORS[name] ?? 'bg-gray-500/20 text-gray-400 border-gray-500/30'
-}
-
-function repoDot(name: string) {
-  return REPO_DOT[name] ?? 'bg-gray-500'
-}
+// Repo colours are derived from the name — see lib/repo-color.
+const repoColor = repoPill
 
 const STATUS_ORDER = ['Working', 'Reviewing', 'Pending', 'Completed', 'Failed']
 

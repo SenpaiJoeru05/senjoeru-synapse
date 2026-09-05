@@ -5,6 +5,7 @@ import {
 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { useRealtime } from '@/lib/realtime'
+import { repoBadge } from '@/lib/repo-color'
 
 // ── types ──────────────────────────────────────────────────────────────────
 interface ExecEvent {
@@ -81,16 +82,8 @@ function badge(status: string) {
   return STATUS_BADGE[status] ?? 'bg-gray-500/20 text-gray-400'
 }
 
-const REPO_BADGE: Record<string, string> = {
-  'fs-llm-service': 'bg-violet-500/20 text-violet-300',
-  'cs-dashboard': 'bg-emerald-500/20 text-emerald-300',
-  'chat-widget': 'bg-cyan-500/20 text-cyan-300',
-  'fsweb': 'bg-amber-500/20 text-amber-300',
-  'seller-page': 'bg-purple-500/20 text-purple-300',
-}
-function repoBadge(repo: string | null) {
-  return REPO_BADGE[repo ?? ''] ?? 'bg-gray-500/20 text-gray-400'
-}
+// Colour is derived from the repo name — see lib/repo-color.
+
 
 type Tab = 'timeline' | 'sessions' | 'tasks'
 type TimelineFilter = 'all' | 'git_commit' | 'task_completed'

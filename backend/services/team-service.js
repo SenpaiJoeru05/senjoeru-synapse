@@ -31,10 +31,12 @@ class TeamService {
   /**
    * @param {string} agentsDir - absolute path to .claude/agents
    * @param {import('../repositories/agent-memory-repository').AgentMemoryRepository} memoryRepo
+   * @param {string} [kitMemoryDir] - joeru-kit's memory/agents, if it exists
    */
-  constructor(agentsDir, memoryRepo) {
+  constructor(agentsDir, memoryRepo, kitMemoryDir) {
     this.agentsDir = agentsDir;
     this.memoryRepo = memoryRepo;
+    this.kitMemoryDir = kitMemoryDir;
   }
 
   /** Live team = persona (from *.md) + memory (from *.memory.md), fresh each call. */
@@ -52,11 +54,14 @@ class TeamService {
       const fm = parseFrontmatter(content);
       const slug = fm.name || path.basename(f, '.md');
 
-      // Memory now lives in agents/memory/<slug>.memory.md; fall back to the
-      // legacy flat location (agents/<slug>.memory.md) for back-compat.
+      // Newest first: joeru-kit owns agent memory now, since a file under
+      // ~/.claude is generated output and isn't backed up. The two older
+      // locations stay as fallbacks so a workspace that never adopted the kit
+      // keeps working.
       let memory = null;
       try {
         const candidates = [
+          ...(this.kitMemoryDir ? [path.join(this.kitMemoryDir, `${slug}.md`)] : []),
           path.join(this.agentsDir, 'memory', `${slug}.memory.md`),
           path.join(this.agentsDir, `${slug}.memory.md`),
         ];

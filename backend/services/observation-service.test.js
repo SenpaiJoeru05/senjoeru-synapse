@@ -23,22 +23,22 @@ function setup() {
 
 test('repo snapshots append only on change (idempotent otherwise)', () => {
   const { svc, repo, write } = setup();
-  write('git.json', { repos: [{ name: 'fs-llm-service', branch: 'dev', ahead: 0, behind: 0, modified: ['a'], staged: [] }] });
+  write('git.json', { repos: [{ name: 'chat-service', branch: 'dev', ahead: 0, behind: 0, modified: ['a'], staged: [] }] });
 
   assert.equal(svc.snapshotAll().repoChanges, 1);
   assert.equal(svc.snapshotAll().repoChanges, 0);           // unchanged → no new row
-  assert.equal(repo.getRepoSnapshots('fs-llm-service').length, 1);
+  assert.equal(repo.getRepoSnapshots('chat-service').length, 1);
 
-  write('git.json', { repos: [{ name: 'fs-llm-service', branch: 'main', ahead: 1, behind: 0, modified: [], staged: [] }] });
+  write('git.json', { repos: [{ name: 'chat-service', branch: 'main', ahead: 1, behind: 0, modified: [], staged: [] }] });
   assert.equal(svc.snapshotAll().repoChanges, 1);           // changed → new row
-  assert.equal(repo.getRepoSnapshots('fs-llm-service').length, 2);
+  assert.equal(repo.getRepoSnapshots('chat-service').length, 2);
 });
 
 test('sessions upsert while active and are marked ended when gone', () => {
   const { svc, repo, write } = setup();
   write('sessions.json', { activeSessions: [
-    { sessionId: 's1', pid: 111, cwd: 'd:\\FlowerStorePH\\fs-llm-service', kind: 'interactive', version: '2.1', startedAt: 1 },
-    { sessionId: 's2', pid: 222, cwd: 'd:\\FlowerStorePH\\cs-dashboard' },
+    { sessionId: 's1', pid: 111, cwd: 'd:\\acme\\chat-service', kind: 'interactive', version: '2.1', startedAt: 1 },
+    { sessionId: 's2', pid: 222, cwd: 'd:\\acme\\dashboard' },
   ] });
   let r = svc.snapshotAll();
   assert.equal(r.sessionsSeen, 2);
@@ -46,20 +46,20 @@ test('sessions upsert while active and are marked ended when gone', () => {
   assert.equal(repo.getSessions().length, 2);
 
   // s2 disappears → marked ended; s1 stays active.
-  write('sessions.json', { activeSessions: [{ sessionId: 's1', pid: 111, cwd: 'd:\\FlowerStorePH\\fs-llm-service' }] });
+  write('sessions.json', { activeSessions: [{ sessionId: 's1', pid: 111, cwd: 'd:\\acme\\chat-service' }] });
   r = svc.snapshotAll();
   assert.equal(r.sessionsEnded, 1);
   const sessions = Object.fromEntries(repo.getSessions().map((s) => [s.session_id, s]));
   assert.equal(sessions.s1.active, 1);
   assert.equal(sessions.s2.active, 0);
   assert.ok(sessions.s2.ended_at, 's2 has an ended_at');
-  assert.equal(sessions.s1.repo, 'fs-llm-service'); // derived from cwd
+  assert.equal(sessions.s1.repo, 'chat-service'); // derived from cwd
 });
 
 test('agent activity appends only on state change', () => {
   const { svc, repo, write } = setup();
   write('agents.json', { agents: [
-    { name: 'Backend Engineer', status: 'Working', activeCwd: 'd:\\FlowerStorePH\\fsweb' },
+    { name: 'Backend Engineer', status: 'Working', activeCwd: 'd:\\acme\\web-app' },
     { name: 'QA Engineer', status: 'Idle', activeCwd: null },
   ] });
   assert.equal(svc.snapshotAll().agentChanges, 2);

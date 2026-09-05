@@ -100,12 +100,12 @@ test('repos array round-trips through JSON storage', () => {
   const { boardPath, svc, repo } = setup();
   writeBoard(boardPath, [{
     id: 'a', title: 'Multi', status: 'Working',
-    repos: [{ name: 'fs-llm-service', branch: 'dev', status: 'Working' }],
+    repos: [{ name: 'chat-service', branch: 'dev', status: 'Working' }],
   }]);
   svc.sync();
   const stored = JSON.parse(repo.getById('a').repos_json);
   assert.equal(stored.length, 1);
-  assert.equal(stored[0].name, 'fs-llm-service');
+  assert.equal(stored[0].name, 'chat-service');
   assert.equal(stored[0].branch, 'dev');
 });
 

@@ -69,7 +69,7 @@ test('snapshotMetrics records headline counts for the day', () => {
 
 test('recordGitCommits appends commit events idempotently', () => {
   const files = { 'git.json': { repos: [
-    { name: 'fs-llm-service', commits: [
+    { name: 'chat-service', commits: [
       { hash: 'aaa111', message: 'feat: x', date: '2026-07-21T00:00:00+08:00' },
       { hash: 'bbb222', message: 'fix: y', date: '2026-07-20T00:00:00+08:00' },
     ] },

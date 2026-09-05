@@ -13,7 +13,7 @@ const STATUS_COLOR: Record<string, string> = {
   Reviewing: 'text-fuchsia-300', Failed: 'text-rose-300', Pending: 'text-slate-400',
 }
 
-/** Last path segment of a working dir, e.g. "d:\FlowerStorePH\fs-llm-service" → "fs-llm-service". */
+/** Last path segment of a working dir, e.g. "d:\work\my-api" → "my-api". */
 function cwdName(cwd: string): string {
   const parts = cwd.split(/[\\/]/).filter(Boolean)
   return parts[parts.length - 1] || cwd

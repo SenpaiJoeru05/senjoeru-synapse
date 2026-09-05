@@ -2,7 +2,7 @@ import { Handle, Position, type NodeProps } from '@xyflow/react'
 import { motion } from 'framer-motion'
 import type { RootData } from '@/lib/network-types'
 
-/** Central hub node — large, purple-glowing FlowerStorePH mark. */
+/** Central hub node — large, purple-glowing workspace mark. */
 export default function RootNode({ data }: NodeProps) {
   const d = data as RootData
   return (
