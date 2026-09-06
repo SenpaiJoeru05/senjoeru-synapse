@@ -7,6 +7,31 @@ nothing from them beyond answering one question.
 Everything here is for **this machine**. Nothing you write in `metrics/config.json`
 or `data/` is ever committed — both are gitignored.
 
+## 0. Set up joeru-kit first, if they want the agent team
+
+Synapse is a dashboard — it shows agents, it does not create them. Without a
+roster the Team page is empty and nothing writes the task board, which looks
+like a broken install rather than an empty one.
+
+Ask whether they want the agent team as well. If yes, do this **before** the
+steps below:
+
+```bash
+cd ..                     # clone it as a SIBLING of this repo
+git clone https://github.com/SenpaiJoeru05/joeru-kit-public joeru-kit
+cd joeru-kit && npm run setup
+```
+
+**Siblings matter.** `joeru-kit init` looks for a Synapse checkout next to
+itself to wire up the task-board path. Nested or far apart, that detection
+fails and the board stays empty.
+
+If they say they already have their own kit — a private fork with their own
+agents and memory — clone **that** instead. The public one ships nine generic
+agents and no memory; using it would discard a team they already have.
+
+Then come back here and continue.
+
 ## 1. Check the prerequisites
 
 ```bash
@@ -71,7 +96,7 @@ say so, or they will think the install failed.
 | Tasks | Agents that write the task board (see below) |
 | Team | Agent definitions in `~/.claude/agents` |
 | Joeru → Chat | `opencode serve` — `npm run dev` starts it |
-| Joeru → Memory | A [joeru-kit](https://github.com/SenpaiJoeru05/joeru-kit) checkout |
+| Joeru → Memory | A [joeru-kit](https://github.com/SenpaiJoeru05/joeru-kit-public) checkout (step 0) |
 
 ## The task board
 
