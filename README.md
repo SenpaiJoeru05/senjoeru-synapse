@@ -76,7 +76,7 @@ the dashboard in a browser instead.
 ### What works without extra setup
 
 Most of it. The dashboard reads whatever is already on your machine — Claude
-sessions, git history, `~/.claude/tasks.json` if your agents write one. An empty
+sessions, git history, the task board if your agents write one. An empty
 workspace shows empty pages rather than errors.
 
 ### What needs something extra
