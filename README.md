@@ -34,8 +34,13 @@ Open the clone in either and say:
 set this up for me
 ```
 
-It installs, writes a config pointing at your repos, and tells you what will be
-empty until you use it. Everything it writes is gitignored.
+It asks whether you also want the agent team, and if so sets up
+[joeru-kit](https://github.com/SenpaiJoeru05/joeru-kit-public) alongside — as a
+sibling directory, which is what lets the two find each other. Then it installs,
+writes a config pointing at your repos, and tells you which pages will be empty
+until you have used them.
+
+Everything it writes is gitignored. It will not start anything without asking.
 
 ### Or by hand
 
@@ -71,7 +76,7 @@ the dashboard in a browser instead.
 ### What works without extra setup
 
 Most of it. The dashboard reads whatever is already on your machine — Claude
-sessions, git history, `~/.claude/tasks.json` if your agents write one. An empty
+sessions, git history, the task board if your agents write one. An empty
 workspace shows empty pages rather than errors.
 
 ### What needs something extra
@@ -79,9 +84,9 @@ workspace shows empty pages rather than errors.
 | Page | Needs |
 |---|---|
 | **Joeru → Chat** | `opencode serve` running — `npm run dev` starts it |
-| **Joeru → Memory** | a [joeru-kit](https://github.com/SenpaiJoeru05/joeru-kit) checkout, for the memory files |
+| **Joeru → Memory** | a [joeru-kit](https://github.com/SenpaiJoeru05/joeru-kit-public) checkout, for the memory files |
 | **Joeru → Activity** | OpenCode installed; reads its database directly |
-| **Tasks** | agents that write `~/.claude/tasks.json` |
+| **Tasks** | agents that write `data/tasks.json` — joeru-kit's already do |
 
 Each degrades honestly — a page whose dependency is missing says what's missing
 and how to provide it, rather than failing silently.
@@ -107,7 +112,7 @@ senjoeru-synapse/
 Four processes on localhost: Vite (5173), the API (3001), the collectors, and
 `opencode serve` (4097). Electron wraps the first two.
 
-**Related:** [joeru-kit](https://github.com/SenpaiJoeru05/joeru-kit) defines the
+**Related:** [joeru-kit](https://github.com/SenpaiJoeru05/joeru-kit-public) defines the
 agents, skills, and memory that Synapse observes. Synapse is the cockpit; the
 kit is the crew. Neither requires the other — Synapse works without it, minus
 the Memory tab.
