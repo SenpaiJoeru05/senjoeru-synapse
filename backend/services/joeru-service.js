@@ -53,7 +53,10 @@ class JoeruService {
         reason: err.name === 'AbortError'
           ? `No response from ${this.baseUrl}`
           : err.message,
-        hint: 'Start it with: opencode serve --port 4096',
+        // Port 4097, not OpenCode's default 4096 — that one collides with the
+        // Kilo Code VS Code extension, and this hint used to send people
+        // straight into that error.
+        hint: 'Start it with: npm run dev:joeru  (opencode serve --port 4097)',
       };
     }
   }
