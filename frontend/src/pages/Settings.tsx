@@ -203,19 +203,27 @@ export default function Settings() {
         <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.05 }} className="glass-card">
           <h2 className="text-xl font-bold mb-6 flex items-center gap-2">
             <Cpu className="w-5 h-5 text-primary" />
-            Claude Configuration
+            Claude Code Data Source
           </h2>
 
           <div className="space-y-4">
             <div className="p-4 rounded-lg bg-surface2">
-              <label className="block text-sm font-medium mb-2 text-gray-400">Claude Directory Path</label>
+              <label className="block text-sm font-medium mb-2 text-gray-400">
+                Session history directory
+              </label>
               <input
                 type="text"
                 value={config.claudeDir}
                 onChange={e => update({ claudeDir: e.target.value })}
+                placeholder="Leave blank — resolves to your home .claude folder"
                 className="w-full px-4 py-2 rounded-lg bg-background border border-white/10 focus:border-primary focus:outline-none font-mono text-sm"
               />
-              <p className="text-xs text-gray-500 mt-2">Read-only — never modified by Synapse</p>
+              <p className="text-xs text-gray-500 mt-2">
+                Where Claude Code writes its own session logs — the source for Overview, History,
+                Insights and token/cost. Read-only; Synapse never modifies it. Blank is normal and
+                correct: set a path only if your <span className="font-mono">.claude</span> lives
+                somewhere non-standard.
+              </p>
             </div>
 
             <div className="flex items-center justify-between p-4 rounded-lg bg-surface2">

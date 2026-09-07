@@ -2,8 +2,6 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const fs = require('fs-extra');
-const chokidar = require('chokidar');
-const cron = require('node-cron');
 const http = require('http');
 const { WebSocketServer } = require('ws');
 const { buildLaidOutGraph } = require('./lib/graph-builder');
@@ -57,7 +55,7 @@ const { MemoryService } = require('./services/memory-service');
 const { createJoeruRouter } = require('./routes/joeru');
 
 const app = express();
-const PORT = 3001;
+const PORT = Number(process.env.PORT) || 3001;
 
 // Middleware
 app.use(cors());
@@ -75,23 +73,26 @@ const CLAUDE_TASKS_FILE = _wsCfg.paths.tasksFile;
 fs.ensureDirSync(METRICS_DIR);
 
 // Initialize metrics files
-const initializeMetrics = () => {
-  const metricsFiles = [
-    'agents.json',
-    'tasks.json',
-    'tokens.json',
-    'costs.json',
-    'tests.json',
-    'git.json',
-    'sessions.json'
-  ];
+// Placeholders use the same shape the matching collector writes. They used to
+// all be `{ data: [] }`, so a page reading a not-yet-collected file saw a key
+// that never appears again once the collector runs.
+const METRICS_PLACEHOLDERS = {
+  'agents.json':   { agents: [] },
+  'tasks.json':    { tasks: [] },
+  'tokens.json':   { today: 0, weekly: 0, trend: 0, weeklyTrend: 0, daily: [] },
+  'costs.json':    { today: 0, thisHour: 0, weekly: 0, monthly: 0, trend: 0, weeklyTrend: 0 },
+  'git.json':      { repos: [] },
+  'sessions.json': { sessionCount: 0, active: false, activeSessions: [] },
+  'tests.json':    { data: [] },
+};
 
-  metricsFiles.forEach(file => {
+const initializeMetrics = () => {
+  for (const [file, shape] of Object.entries(METRICS_PLACEHOLDERS)) {
     const filePath = path.join(METRICS_DIR, file);
     if (!fs.existsSync(filePath)) {
-      fs.writeJsonSync(filePath, { lastUpdated: new Date().toISOString(), data: [] });
+      fs.writeJsonSync(filePath, { lastUpdated: new Date().toISOString(), ...shape });
     }
-  });
+  }
 };
 
 initializeMetrics();
@@ -329,14 +330,29 @@ async function readAllMetrics() {
 }
 
 // Point-in-time system/host health. Synchronous stats keep it cheap.
+function directorySize(dir) {
+  let total = 0;
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    try {
+      if (entry.isDirectory()) total += directorySize(full);
+      else if (entry.isFile()) total += fs.statSync(full).size;
+    } catch (_) { /* vanished mid-walk, or unreadable — skip it */ }
+  }
+  return total;
+}
+
 function getSystemHealthData() {
   const os = require('os');
   const cpus = os.cpus();
   const totalMemory = os.totalmem();
   const freeMemory = os.freemem();
   const usedMemory = totalMemory - freeMemory;
+  // statSync on the directory returns the directory ENTRY size (a few hundred
+  // bytes on Windows), not the tree — it read as "Claude uses 0.0 MB" no matter
+  // how large the transcripts got.
   let claudeSize = 0;
-  try { if (fs.existsSync(CLAUDE_DIR)) claudeSize = fs.statSync(CLAUDE_DIR).size; } catch (_) {}
+  try { if (fs.existsSync(CLAUDE_DIR)) claudeSize = directorySize(CLAUDE_DIR); } catch (_) {}
   return {
     cpu: { cores: cpus.length, model: cpus[0]?.model || 'Unknown' },
     memory: {
@@ -426,6 +442,9 @@ app.get('/api/settings', async (req, res) => {
     if (fs.existsSync(configPath)) {
       res.json(await fs.readJson(configPath));
     } else {
+      // Must carry the same keys as SettingsService.DEFAULTS — omitting the
+      // budgets made the Settings page fall back to its own client defaults on
+      // this path, so the numbers differed depending on whether the DB was up.
       res.json({
         claudeDir: CLAUDE_DIR,
         pollInterval: 30,
@@ -433,6 +452,8 @@ app.get('/api/settings', async (req, res) => {
         repositories: [],
         autoRefresh: true,
         notifications: false,
+        hourlyBudget: 5,
+        weeklyBudget: 50,
       });
     }
   } catch (error) {

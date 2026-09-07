@@ -21,6 +21,10 @@ export default function Git() {
   const { metrics, ready } = useRealtime()
   const repos: GitRepo[] = metrics?.git?.repos || []
   const loading = !ready && repos.length === 0
+  // The collector distinguishes "nothing to show" from "git could not run".
+  // Older payloads have no `available` key, so only an explicit false counts.
+  const unavailableReason: string | null =
+    metrics?.git?.available === false ? metrics.git.reason ?? 'git is unavailable' : null
 
   return (
     <div className="p-8">
@@ -31,6 +35,11 @@ export default function Git() {
 
       {loading ? (
         <div className="text-gray-400">Loading git data...</div>
+      ) : unavailableReason ? (
+        <div className="glass-card border border-warning/30">
+          <h2 className="font-semibold mb-2">Git is not available</h2>
+          <p className="text-sm text-gray-400">{unavailableReason}</p>
+        </div>
       ) : repos.length === 0 ? (
         <div className="text-gray-400">No repositories found</div>
       ) : (

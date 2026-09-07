@@ -42,12 +42,22 @@ const CLAUDE_DIR = _cfg.paths.claudeDir;
 const PROJECTS_DIR = _cfg.paths.projectsDir;
 const SESSIONS_DIR = _cfg.paths.sessionsDir;
 
-const PRICING = {
+// Refreshed once per poll rather than read per call: calcCost runs on every
+// usage line of every transcript, so a config stat per call would land on the
+// hottest path in the collector.
+let PRICING = {
   input:       _cfg.pricing.perToken.input,
   output:      _cfg.pricing.perToken.output,
   cache_read:  _cfg.pricing.perToken.cacheRead,
   cache_write: _cfg.pricing.perToken.cacheWrite,
 };
+
+function refreshPricing() {
+  const p = getConfig().pricing.perToken;
+  PRICING = {
+    input: p.input, output: p.output, cache_read: p.cacheRead, cache_write: p.cacheWrite,
+  };
+}
 
 fs.ensureDirSync(METRICS_DIR);
 
@@ -681,6 +691,11 @@ async function collectGit() {
   const repoList = getConfig().repoPaths;
 
   const repos = [];
+  // "No repos" has three very different causes and they need different answers
+  // on the page: none configured, the paths are wrong, or git itself cannot be
+  // spawned. The last one used to render identically to an empty workspace, so
+  // a missing git looked like nothing to report.
+  let unavailable = null;
 
   for (const repoPath of repoList) {
     if (!fs.existsSync(repoPath)) continue;
@@ -712,16 +727,28 @@ async function collectGit() {
         behind: status.behind,
       });
     } catch (err) {
-      console.error(`[git] ${path.basename(repoPath)}: ${err.message}`);
+      if (/ENOENT/.test(err.message)) {
+        unavailable = {
+          kind: 'git-missing',
+          reason: 'The `git` command is not on this process\'s PATH. If git was installed '
+            + 'after the collector (or its terminal, or the editor that opened it) started, '
+            + 'that process still has the old PATH — restart it to pick git up.',
+        };
+      } else {
+        console.error(`[git] ${path.basename(repoPath)}: ${err.message}`);
+      }
     }
   }
 
   await fs.writeJson(path.join(METRICS_DIR, 'git.json'), {
     lastUpdated: new Date().toISOString(),
+    available: !unavailable,
+    ...(unavailable || {}),
     repos,
   }, { spaces: 2 });
 
-  console.log(`[git] repos=${repos.length} (${repos.map(r => r.name).join(', ')})`);
+  if (unavailable) console.error(`[git] unavailable — ${unavailable.reason}`);
+  else console.log(`[git] repos=${repos.length} (${repos.map(r => r.name).join(', ')})`);
 }
 
 // ─── activity collector (generates events from real data) ─────────────────────
@@ -826,6 +853,7 @@ async function collectActivity() {
 
 async function poll() {
   try {
+    refreshPricing();   // config is mtime-cached, so this is a stat unless it changed
     await Promise.all([
       collectTokens(),
       collectSessions(),
