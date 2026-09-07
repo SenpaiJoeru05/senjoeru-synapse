@@ -115,6 +115,20 @@ function openAssistantWindow() {
   // the dev server and file://.
   assistantWindow.loadURL(`${base}?view=assistant`);
 
+  // A crashed renderer just goes black, with nothing in the window to say why.
+  // Speech loads a ~24MB WASM runtime and touches WebGPU, both of which can
+  // take the process down, so say so out loud in the terminal.
+  assistantWindow.webContents.on('render-process-gone', (_e, details) => {
+    console.error(`[assistant] renderer gone: reason=${details.reason} exitCode=${details.exitCode}`);
+  });
+  assistantWindow.webContents.on('unresponsive', () => {
+    console.error('[assistant] renderer unresponsive');
+  });
+  assistantWindow.webContents.on('console-message', (_e, level, message) => {
+    // level 3 is error. Surfacing only errors keeps the dev output readable.
+    if (level >= 3) console.error(`[assistant:console] ${message}`);
+  });
+
   assistantWindow.on('closed', () => {
     assistantWindow = null;
   });
@@ -148,6 +162,67 @@ app.on('window-all-closed', () => {
     app.quit();
   }
 });
+
+// Voice lives in the main process on purpose. The renderer attempt — Whisper
+// via onnxruntime WASM — faulted Chromium with an access violation and took
+// the window black with no diagnostics. A subprocess fails with an exit code.
+const tts = require('./tts');
+const stt = require('./stt');
+const claude = require('./claude');
+
+// Breadcrumbs for a renderer that dies without a stack. A crashed renderer
+// takes its console with it, but an IPC message already received by the main
+// process survives — so the last line printed is the step it died on.
+ipcMain.on('trace', (_e, step) => {
+  console.log(`[assistant:trace] ${step}`);
+});
+
+ipcMain.handle('voice-info', async () => ({
+  tts: tts.describe(),
+  // Windows' recogniser needs no install; presence was verified at build time.
+  stt: { available: process.platform === 'win32', engine: 'Windows System.Speech' },
+  claude: claude.describe(),
+}));
+
+// Assistant Mode's answering brain. One question per invocation, triggered by
+// the user — the same thing as typing `claude -p` in a terminal.
+ipcMain.handle('claude-ask', async (_e, question) => claude.ask(question));
+
+ipcMain.handle('claude-cancel', async () => { claude.cancel(); return true; });
+
+// What gets asked, and which brain answered. A question that keeps falling
+// through to the ~13s fallback is a candidate for being made instant, and this
+// is the only honest way to find out which ones those are.
+const questions = require('./question-log');
+
+ipcMain.on('assistant-log', (_e, entry) => {
+  try {
+    questions.record(entry?.question, entry?.route, entry?.ms, entry?.intent ?? null);
+  } catch (err) {
+    console.error(`[questions] ${err.message}`);
+  }
+});
+
+ipcMain.handle('assistant-insights', async () => questions.insights());
+
+// Returns a WAV buffer. Sent whole rather than streamed: Piper renders a
+// sentence in well under a second, so chunking would add complexity for no
+// perceptible gain.
+ipcMain.handle('voice-speak', async (_e, text) => {
+  const wav = await tts.speak(text);
+  return wav ? wav.buffer.slice(wav.byteOffset, wav.byteOffset + wav.byteLength) : null;
+});
+
+ipcMain.handle('voice-stop-speaking', async () => { tts.cancel(); return true; });
+
+ipcMain.handle('voice-set-voice', async (_e, id) => {
+  tts.setVoice(id);
+  return tts.describe();
+});
+
+ipcMain.handle('voice-listen', async () => stt.listen({ timeoutSeconds: 12 }));
+
+ipcMain.handle('voice-cancel-listen', async () => { stt.cancel(); return true; });
 
 ipcMain.handle('open-assistant', async () => {
   openAssistantWindow();

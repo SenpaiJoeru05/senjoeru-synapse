@@ -1,6 +1,10 @@
 node_modules/
 dist/
 .env
+
+# Piper neural TTS: piper.exe plus a voice model, ~80MB of binary that does not
+# belong in git. Fetched by `npm run voice:setup`.
+vendor/
 .DS_Store
 *.log
 frontend/dist/

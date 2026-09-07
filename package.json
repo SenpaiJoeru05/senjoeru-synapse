@@ -11,6 +11,7 @@
     "dev:collector": "cd collectors && node index.js",
     "dev:joeru": "opencode serve --port 4097",
     "dev:electron": "wait-on http://localhost:5173 && electron .",
+    "voice:setup": "node electron/setup-voice.js",
     "build": "npm run build:frontend",
     "build:frontend": "cd frontend && npm run build",
     "build:electron": "electron-builder",

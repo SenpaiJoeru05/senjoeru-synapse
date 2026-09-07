@@ -23,7 +23,12 @@ export interface Answer {
   speech: string
   /** Shown on screen. The detail the speech deliberately omits. */
   lines: string[]
-  source: 'local' | 'joeru'
+  /**
+   * Which brain answered. Surfaced in the UI because the three have very
+   * different costs: local spends nothing, claude spends subscription quota,
+   * joeru spends free-tier requests.
+   */
+  source: 'local' | 'joeru' | 'claude'
 }
 
 const RULES: [RegExp, Intent][] = [
@@ -38,17 +43,84 @@ export function classify(question: string): Intent {
   return 'ask'
 }
 
-/** speechSynthesis reads "$67.50" as "dollar sixty seven point five". */
+/**
+ * These strings are read aloud, so they are written as speech rather than as a
+ * status line. Two rules do most of the work:
+ *
+ *   Spell small numbers out. A TTS engine reads "4 completed" as a fragment
+ *   and often clips the digit; "four" scans as part of the sentence.
+ *
+ *   Join with conjunctions, not full stops. "4 completed. 2 items need
+ *   attention." is telegraphic — every period is a hard stop, which is what
+ *   makes a synthetic voice sound like a robot reading a table. Commas and
+ *   "and" give it the prosody of a spoken clause.
+ */
+const WORDS = [
+  'zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight',
+  'nine', 'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen',
+  'sixteen', 'seventeen', 'eighteen', 'nineteen', 'twenty',
+]
+
+/** Words up to twenty, digits above — "thirty-seven tasks" is rarer than useful. */
+export function spokenNumber(n: number): string {
+  return n >= 0 && n <= 20 && Number.isInteger(n) ? WORDS[n] : String(n)
+}
+
+/**
+ * "$67.50" is read as "dollar sixty seven point five" by most engines.
+ *
+ * Digits throughout, deliberately — spelling only the small half produced
+ * "124 dollars and sixteen cents", which is worse than either convention.
+ * TTS reads bare numerals in a money phrase correctly.
+ */
 export function spokenMoney(n: number): string {
   const dollars = Math.floor(n)
   const cents = Math.round((n - dollars) * 100)
   const d = `${dollars} dollar${dollars === 1 ? '' : 's'}`
   // "66 dollars 66" is ambiguous out loud; name the unit.
-  return cents ? `${d} ${cents} cent${cents === 1 ? '' : 's'}` : d
+  return cents ? `${d} and ${cents} cent${cents === 1 ? '' : 's'}` : d
 }
 
+/**
+ * Turns a dashboard detail string into something speakable.
+ *
+ * These fields are written for the eye — "$124.16 / $50.00 (248%)" — and a TTS
+ * engine reads that as "dollar one two four point one six slash dollar fifty".
+ * The screen still shows the original; only the spoken copy is rewritten.
+ */
+export function speakable(detail: string): string {
+  return String(detail)
+    // $1,234.56 -> 1234 dollars and 56 cents
+    .replace(/\$([\d,]+)(?:\.(\d{2}))?/g, (_m, whole: string, cents?: string) => {
+      const n = Number(whole.replace(/,/g, ''))
+      const base = `${n} dollar${n === 1 ? '' : 's'}`
+      const c = cents ? Number(cents) : 0
+      return c ? `${base} and ${c} cent${c === 1 ? '' : 's'}` : base
+    })
+    .replace(/\((\d+(?:\.\d+)?)%\)/g, ', $1 percent')
+    .replace(/(\d+(?:\.\d+)?)%/g, '$1 percent')
+    .replace(/\s*\/\s*/g, ' of ')
+    .replace(/\s{2,}/g, ' ')
+    // The substitutions above can leave " ," where a slash preceded a bracket,
+    // and a space before a comma becomes an audible stumble.
+    .replace(/\s+([,.])/g, '$1')
+    .trim()
+}
+
+/** Speech starts a sentence; the clauses are written to read mid-sentence. */
+const capitalise = (s: string) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s)
+
 const plural = (n: number, one: string, many = one + 's') =>
-  `${n} ${n === 1 ? one : many}`
+  `${spokenNumber(n)} ${n === 1 ? one : many}`
+
+/** Joins clauses the way a person would: "a, b, and c". */
+function sentence(clauses: string[]): string {
+  const parts = clauses.filter(Boolean)
+  if (!parts.length) return ''
+  if (parts.length === 1) return `${parts[0]}.`
+  if (parts.length === 2) return `${parts[0]}, and ${parts[1]}.`
+  return `${parts.slice(0, -1).join(', ')}, and ${parts[parts.length - 1]}.`
+}
 
 /** Highest severity first, so the spoken headline is the thing that matters. */
 const RANK: Record<string, number> = { high: 0, medium: 1, low: 2 }
@@ -70,15 +142,17 @@ async function answerNext(): Promise<Answer> {
 
   const top = items[0]
   const rest = items.length - 1
-  // Speak the headline and a count; the screen carries the rest. Reading a
-  // list aloud is unbearable past about three items.
+  // Headline plus a count; the screen carries the rest. Reading a list aloud
+  // is unbearable past about three items. Phrased as one clause so it does not
+  // land as three clipped fragments.
+  const detail = top.detail ? ` — ${speakable(top.detail)}` : ''
   const speech = rest > 0
-    ? `${plural(items.length, 'thing')} need attention. Top one: ${top.title}. ${top.detail ?? ''}`
-    : `One thing needs attention: ${top.title}. ${top.detail ?? ''}`
+    ? `${plural(items.length, 'thing')} need your attention. The main one is ${top.title}${detail}.`
+    : `One thing needs your attention: ${top.title}${detail}.`
 
   return {
     intent: 'next',
-    speech: speech.trim(),
+    speech: capitalise(speech.trim()),
     lines: items.slice(0, 8).map((i: any) =>
       `[${i.severity}] ${i.title}${i.detail ? ` — ${i.detail}` : ''}`),
     source: 'local',
@@ -106,27 +180,25 @@ async function answerStatus(): Promise<Answer> {
     }
   }
 
-  // Built as whole sentences: joining fragments with ". " produced
-  // "4 completed. and 2 items needs attention." — a conjunction after a full
-  // stop, and a plural noun with a singular verb. Both are obvious out loud.
-  const sentences: string[] = [
-    working.length
-      ? `${plural(working.length, 'task')} in progress: ${working.map((t) => t.title).join(', ')}`
-      : 'Nothing is in progress right now',
-  ]
+  // One flowing sentence rather than a list of fragments. Reading the titles
+  // of in-progress work aloud is the useful part; the rest is counts.
+  const clauses: string[] = []
 
-  const counts: string[] = []
-  if (pending.length) counts.push(`${plural(pending.length, 'task')} waiting`)
-  if (done.length) counts.push(`${done.length} completed`)
-  if (counts.length) sentences.push(counts.join(' and '))
-
-  if (needs) {
-    sentences.push(`${plural(needs, 'item')} ${needs === 1 ? 'needs' : 'need'} attention`)
+  if (working.length === 1) {
+    clauses.push(`you're working on ${working[0].title}`)
+  } else if (working.length > 1) {
+    clauses.push(`${plural(working.length, 'task')} are in progress`)
+  } else {
+    clauses.push("nothing's in progress at the moment")
   }
+
+  if (pending.length) clauses.push(`${plural(pending.length, 'task')} waiting`)
+  if (done.length) clauses.push(`${plural(done.length, 'task')} complete`)
+  if (needs) clauses.push(`${plural(needs, 'item')} ${needs === 1 ? 'needs' : 'need'} your attention`)
 
   return {
     intent: 'status',
-    speech: sentences.join('. ') + '.',
+    speech: capitalise(sentence(clauses)),
     lines: tasks.slice(0, 8).map((t) =>
       `${t.status} · ${t.progress ?? 0}% · ${t.title}`),
     source: 'local',
@@ -153,7 +225,7 @@ async function answerSpend(): Promise<Answer> {
 
   return {
     intent: 'spend',
-    speech: `Today you have spent ${spokenMoney(today)}, and ${spokenMoney(weekly)} this week.`,
+    speech: `You've spent ${spokenMoney(today)} today, and ${spokenMoney(weekly)} so far this week.`,
     lines: [
       `today   $${today.toFixed(2)}`,
       `week    $${weekly.toFixed(2)}`,
@@ -193,10 +265,10 @@ async function answerBroken(): Promise<Answer> {
   }
 
   const speech = items.length
-    ? `${plural(items.length, 'thing')} looks wrong. ${items[0].title}.`
-    : 'Git is not available, so repository activity cannot be read.'
+    ? `${plural(items.length, 'thing')} ${items.length === 1 ? 'looks' : 'look'} wrong — ${items[0].title}.`
+    : "Git isn't available, so I can't read repository activity."
 
-  return { intent: 'broken', speech, lines, source: 'local' }
+  return { intent: 'broken', speech: capitalise(speech), lines, source: 'local' }
 }
 
 /**
