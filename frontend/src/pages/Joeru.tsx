@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Bot, MessageSquare, Activity, Brain } from 'lucide-react'
+import { Bot, MessageSquare, Activity, Brain, Mic } from 'lucide-react'
 import JoeruChat from './JoeruChat'
 import JoeruActivity from './JoeruActivity'
 import JoeruMemory from './JoeruMemory'
@@ -31,6 +31,22 @@ export default function Joeru() {
           </p>
         </div>
 
+        <div className="flex items-center gap-2">
+          {/*
+            An action, not a fourth tab — it opens a separate window rather
+            than swapping the pane below, so it sits outside the pill group.
+            Hidden without Electron: `npm run dev:web` has no window to open.
+          */}
+          {window.electronAPI?.openAssistant && (
+            <button
+              onClick={() => window.electronAPI?.openAssistant?.()}
+              title="Open Assistant Mode in a separate window"
+              className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-primary/40 text-primary hover:bg-primary/10 text-sm transition-colors"
+            >
+              <Mic className="w-3.5 h-3.5" /> Assistant Mode
+            </button>
+          )}
+
         <div className="flex items-center gap-1 p-1 rounded-xl bg-surface2 w-fit">
           {TABS.map(({ key, label, icon: Icon }) => (
             <button
@@ -45,6 +61,7 @@ export default function Joeru() {
               <Icon className="w-3.5 h-3.5" /> {label}
             </button>
           ))}
+          </div>
         </div>
       </div>
 

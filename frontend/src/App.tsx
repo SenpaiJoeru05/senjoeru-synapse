@@ -12,8 +12,21 @@ import Knowledge from './pages/Knowledge'
 import Insights from './pages/Insights'
 import AgentNetwork from './pages/AgentNetwork'
 import Settings from './pages/Settings'
+import Assistant from './pages/Assistant'
 
 function App() {
+  // Assistant Mode is its own frameless window, so it renders before the
+  // router and outside Layout — no sidebar, no chrome. A query param rather
+  // than a route because the packaged build loads over file://, where
+  // BrowserRouter cannot resolve a path.
+  if (new URLSearchParams(window.location.search).get('view') === 'assistant') {
+    return (
+      <RealtimeProvider>
+        <Assistant />
+      </RealtimeProvider>
+    )
+  }
+
   return (
     <Router>
       <RealtimeProvider>

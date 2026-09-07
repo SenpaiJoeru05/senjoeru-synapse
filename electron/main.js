@@ -4,6 +4,7 @@ const { spawn } = require('child_process');
 const isDev = !app.isPackaged;
 
 let mainWindow;
+let assistantWindow = null;
 let collectorProcess = null;
 let backendProcess = null;
 
@@ -73,6 +74,52 @@ function createWindow() {
   });
 }
 
+// Assistant Mode — a small always-on-top window for spoken status questions.
+// Same bundle on the /assistant route, so it shares the API client, theme and
+// socket rather than being a second app.
+function openAssistantWindow() {
+  // Singleton: a second window would mean two speech queues talking over each
+  // other, and there is only one voice.
+  if (assistantWindow && !assistantWindow.isDestroyed()) {
+    assistantWindow.show();
+    assistantWindow.focus();
+    return;
+  }
+
+  assistantWindow = new BrowserWindow({
+    width: 440,
+    height: 560,
+    minWidth: 360,
+    minHeight: 420,
+    // frame:false needs the renderer to supply its own drag region and close
+    // button — see Assistant.tsx.
+    frame: false,
+    backgroundColor: '#0a0a0f',
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    resizable: true,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      enableRemoteModule: false,
+      preload: path.join(__dirname, 'preload.js'),
+    },
+  });
+
+  const base = isDev
+    ? 'http://localhost:5173'
+    : `file://${path.join(__dirname, '../frontend/dist/index.html')}`;
+  // A query param, not a route. The app uses BrowserRouter, so a /assistant
+  // path resolves against the filesystem under file:// and 404s in the packaged
+  // build. ?view=assistant is read before the router mounts and works for both
+  // the dev server and file://.
+  assistantWindow.loadURL(`${base}?view=assistant`);
+
+  assistantWindow.on('closed', () => {
+    assistantWindow = null;
+  });
+}
+
 app.whenReady().then(() => {
   // Dev runs the backend AND the collector via `concurrently` — spawning our
   // own would mean two collectors polling and writing the same metrics files,
@@ -100,6 +147,18 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit();
   }
+});
+
+ipcMain.handle('open-assistant', async () => {
+  openAssistantWindow();
+  return true;
+});
+
+// The assistant window is frameless, so it has no system close button and has
+// to ask for one.
+ipcMain.handle('close-assistant', async () => {
+  if (assistantWindow && !assistantWindow.isDestroyed()) assistantWindow.close();
+  return true;
 });
 
 // IPC handlers for backend communication

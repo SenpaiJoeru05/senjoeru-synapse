@@ -151,12 +151,19 @@ export const api = {
   async joeruAbort(sessionId: string): Promise<any> {
     return (await axios.post(`${API_BASE_URL}/joeru/sessions/${encodeURIComponent(sessionId)}/abort`)).data
   },
-  async joeruSend(sessionId: string, text: string, agent?: string): Promise<any> {
+  async joeruSend(
+    sessionId: string,
+    text: string,
+    agent?: string,
+    // Overrides the agent's own tier. Assistant Mode uses it to ask a fast
+    // model short questions instead of waiting on the deep one.
+    model?: { providerID: string; modelID: string },
+  ): Promise<any> {
     // No axios timeout: a free-tier reply can take minutes, and the backend
     // already bounds it.
     return (await axios.post(
       `${API_BASE_URL}/joeru/sessions/${encodeURIComponent(sessionId)}/messages`,
-      { text, agent },
+      { text, agent, model },
       { timeout: 0 },
     )).data
   },
