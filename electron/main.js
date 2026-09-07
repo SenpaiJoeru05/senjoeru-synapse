@@ -1,7 +1,7 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
-const isDev = require('electron-is-dev');
+const isDev = !app.isPackaged;
 
 let mainWindow;
 let collectorProcess = null;
@@ -56,8 +56,7 @@ function createWindow() {
       contextIsolation: true,
       enableRemoteModule: false,
       preload: path.join(__dirname, 'preload.js')
-    },
-    icon: path.join(__dirname, '../assets/icon.png')
+    }
   });
 
   const startUrl = isDev
