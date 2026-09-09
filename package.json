@@ -15,7 +15,8 @@
     "build": "npm run build:frontend",
     "build:frontend": "cd frontend && npm run build",
     "build:electron": "electron-builder",
-    "postinstall": "cd frontend && npm install && cd ../backend && npm install && cd ../collectors && npm install"
+    "postinstall": "cd frontend && npm install && cd ../backend && npm install && cd ../collectors && npm install && cd .. && node electron/setup-voice.js --if-needed",
+    "voice:setup:all": "node electron/setup-voice.js --all"
   },
   "keywords": [
     "ai",
