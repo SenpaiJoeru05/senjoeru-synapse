@@ -20,6 +20,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
   setVoice: (id) => ipcRenderer.invoke('voice-set-voice', id),
   listen: () => ipcRenderer.invoke('voice-listen'),
   cancelListen: () => ipcRenderer.invoke('voice-cancel-listen'),
+  // whisper.cpp on a WAV the renderer captured. Kept for completeness; the
+  // listen* pair below is preferred because it keeps audio out of the renderer.
+  transcribe: (wav) => ipcRenderer.invoke('whisper-transcribe', wav),
+  cancelTranscribe: () => ipcRenderer.invoke('whisper-cancel'),
+
+  // Capture AND transcription in the main process, via whisper-stream + SDL2.
+  listenStart: () => ipcRenderer.invoke('listen-start'),
+  listenStop: () => ipcRenderer.invoke('listen-stop'),
+  listenCancel: () => ipcRenderer.invoke('listen-cancel'),
 
   // Assistant Mode's answering brain — the Claude Code CLI in print mode,
   // using the existing login rather than an API key.

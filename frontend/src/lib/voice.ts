@@ -249,12 +249,57 @@ export function disposeVoice(): void {
   player.dispose()
 }
 
-/** Listen once. Resolves null on silence. */
-export async function hear(): Promise<{ text: string; confidence: number } | null> {
+export interface Heard {
+  text: string
+  confidence: number
+  grammar: string
+  alternate: string
+}
+
+/**
+ * True when the main process can own the microphone (whisper-stream + SDL2).
+ *
+ * Preferred over every renderer capture design: two of those crashed Chromium
+ * with an access violation on sample-rate conversion, and SDL2 opens the
+ * device at 16kHz natively so nothing resamples.
+ */
+export function usesMainProcessCapture() {
+  return !!api()?.listenStart && !!api()?.listenStop
+}
+
+/** Begin capturing. The transcript arrives from endListening. */
+export async function beginListening(): Promise<void> {
+  await hush()   // never transcribe our own voice
+  await api()?.listenStart?.()
+}
+
+/** Stop capturing and return what was said. */
+export async function endListening(): Promise<Heard | null> {
+  const r = await api()?.listenStop?.()
+  return r?.text ? r : null
+}
+
+export async function abortListening(): Promise<void> {
+  await api()?.listenCancel?.()
+}
+
+/**
+ * Listen once with Windows System.Speech, which captures its own audio.
+ * The fallback path; see recordAndTranscribe for whisper.
+ */
+export async function hear(): Promise<Heard | null> {
   const a = api()
   if (!a?.listen) return null
   await hush()   // never transcribe our own voice
   return a.listen()
+}
+
+/** Transcribe a WAV the renderer captured, via whisper.cpp in the main process. */
+export async function transcribe(wav: ArrayBuffer): Promise<Heard | null> {
+  const a = api()
+  if (!a?.transcribe) return null
+  const r = await a.transcribe(wav)
+  return r?.text ? r : null
 }
 
 export async function stopHearing(): Promise<void> {

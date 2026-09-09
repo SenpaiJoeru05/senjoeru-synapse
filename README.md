@@ -49,9 +49,25 @@ Everything it writes is gitignored. It will not start anything without asking.
 
 ```bash
 git clone <this-repo> senjoeru-synapse && cd senjoeru-synapse
-npm install                                   # installs frontend, backend, collectors
+npm install                # frontend, backend, collectors — and voice, on Windows
 cp metrics/config.example.json metrics/config.json
 npm run dev
+```
+
+`npm install` also fetches Assistant Mode's voice engines — Piper for speech out
+and whisper.cpp for speech in, about 230MB into the gitignored `vendor/`. That
+is deliberately part of install rather than a step to remember, because the
+binaries cannot be committed and a missing one is invisible until you click the
+microphone.
+
+It is skipped when already present, on non-Windows, and in CI, and a failure
+there never fails the install — voice is the one part of the dashboard that
+degrades honestly, reporting itself unavailable and still answering in text.
+So if you installed offline, or want the extra voices:
+
+```bash
+npm run voice:setup        # retry; complains if it cannot finish
+npm run voice:setup:all    # also fetch alan, ryan, amy
 ```
 
 Edit `metrics/config.json` to point at your own repos — every field is optional

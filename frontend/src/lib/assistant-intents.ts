@@ -32,10 +32,19 @@ export interface Answer {
 }
 
 const RULES: [RegExp, Intent][] = [
-  [/\b(broken|breaking|fail(ed|ing)?|stuck|stalled|blocked|error)\b/i, 'broken'],
+  [/\b(broken|breaking|fail(s|ed|ing|ure|ures)?|stuck|stalled|blocked|errors?)\b/i, 'broken'],
   [/\b(spent|spend|cost|costs|budget|token|tokens|money|bill)\b/i, 'spend'],
-  [/\b(next|should i|should we|what now|priorit)/i, 'next'],
-  [/\b(status|update|progress|working on|going on|state)\b/i, 'status'],
+  // "attention" belongs here and was missing, which is how "what two items
+  // need my attention?" reached the model — the endpoint that answers it is
+  // literally called /api/attention. The model then guessed, because it has no
+  // access to that data. Grammar gaps do not degrade to a slower answer; they
+  // degrade to a wrong one.
+  [/\b(attention|needs? me|urgent|important|focus on|priorit)/i, 'next'],
+  [/\b(next|should i|should we|what now)/i, 'next'],
+  // Plurals are optional, not assumed: \bupdate\b does not match "updates",
+  // so "any update" routed locally while "any updates" fell through to the
+  // 13s path. A missed plural is a silent downgrade, not a visible error.
+  [/\b(status|updates?|progress|working on|going on|state)\b/i, 'status'],
 ]
 
 export function classify(question: string): Intent {
