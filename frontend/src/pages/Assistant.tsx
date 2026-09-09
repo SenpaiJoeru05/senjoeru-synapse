@@ -17,7 +17,12 @@ import { answerLocally, classify, type Answer } from '../lib/assistant-intents'
 import { api } from '../lib/api'
 import VoiceOrb from '../components/VoiceOrb'
 import type { AssistantInsights } from '../electron'
-import { say, hush, hear, stopHearing, voiceAvailable, disposeVoice, MicLevel } from '../lib/voice'
+import { currentState, ground } from '../lib/grounding'
+import {
+  say, hush, hear, stopHearing, voiceAvailable, disposeVoice, MicLevel,
+  usesMainProcessCapture, beginListening, endListening, abortListening,
+  type Heard,
+} from '../lib/voice'
 
 interface Turn {
   question: string
@@ -175,6 +180,8 @@ export default function Assistant() {
   const scrollRef = useRef<HTMLDivElement>(null)
   const mutedRef = useRef(false)
   const micRef = useRef<MicLevel | null>(null)
+  /** Set while listening; calling it ends the turn. */
+  const stopListeningRef = useRef<(() => void) | null>(null)
   const sessionRef = useRef<string | null>(null)
   const busy = phase !== 'idle'
 
@@ -202,6 +209,7 @@ export default function Assistant() {
     micRef.current?.stop()
     hush()
     stopHearing()
+    abortListening()
     disposeVoice()   // only here — the audio device stays warm between answers
   }, [])
 
@@ -262,7 +270,11 @@ export default function Assistant() {
       // why haiku rather than the strongest model — these are short questions.
       if (window.electronAPI?.claudeAsk) {
         try {
-          const answer = (await window.electronAPI.claudeAsk(q)).trim()
+          // Hand it the live numbers. Without them it invents a summary of the
+          // board and asks the user to supply the answer — observed, not
+          // hypothetical. See lib/grounding.ts.
+          const state = await currentState()
+          const answer = (await window.electronAPI.claudeAsk(ground(q, state))).trim()
           if (answer) {
             log('claude')
             setTurns((t) => [...t.slice(0, -1), {
@@ -316,14 +328,102 @@ export default function Assistant() {
     }
   }, [speakAnswer])
 
+  /**
+   * What to do with a transcription, shared by both recognisers.
+   *
+   * Gate on the cost of being wrong, not on a confidence threshold. The
+   * Windows recogniser's confidence is unusable as a gate — measured around
+   * 0.002 even on word-perfect transcriptions — and whisper reports none at
+   * all, so any floor rejects everything or nothing.
+   *
+   * What differs is the consequence. A transcription matching a local intent
+   * is instant and free, and a misheard phrase rarely lands on one by
+   * accident. Anything else goes to Claude: ~13s and real quota, where acting
+   * on "I thought it" instead of "hi" answers a question never asked. Those
+   * are shown for confirmation instead.
+   */
+  const routeHeard = useCallback(async (heard: Heard) => {
+    if (classify(heard.text) !== 'ask') {
+      setStatus(null)
+      await ask(heard.text)
+      return
+    }
+    setPhase('idle')
+    setInput(heard.text)
+    setStatus(
+      `Heard "${heard.text}"`
+      + (heard.alternate ? ` (or "${heard.alternate}")` : '')
+      + ' — edit if wrong, then send.',
+    )
+  }, [ask])
+
   /** One click does the right thing for whatever it is currently doing. */
   async function onOrbClick() {
     if (phase === 'speaking') { await hush(); setAnalyser(null); setPhase('idle'); return }
-    if (phase === 'listening') { await stopHearing(); return }
+    if (phase === 'listening') {
+      // whisper: the turn is a promise waiting on this second click, so
+      // resolving it lets the listening path move on to stop and transcribe.
+      // System.Speech: it blocks inside its own recognise call, so the only
+      // way out is to tell the main process to cancel it.
+      if (stopListeningRef.current) { stopListeningRef.current(); stopListeningRef.current = null }
+      else await stopHearing()
+      return
+    }
     if (phase === 'thinking') return
 
     setStatus(null)
     setPhase('listening')
+
+    /*
+     * Two capture paths, and NEITHER records in the renderer.
+     *
+     * whisper: whisper-stream owns the device through SDL2, and the turn ends
+     * on a second click. Windows System.Speech owns its own device too, but
+     * blocks until it decides the utterance is over, so the turn ends by
+     * itself. Either way the renderer only opens a parallel stream to give the
+     * orb something to react to — Windows shares the mic, so both can read it.
+     *
+     * Recording in the renderer was tried twice and crashed Chromium both
+     * times with an access violation on sample-rate conversion. See lib/voice.ts.
+     *
+     * whisper is preferred on accuracy: on the same clips it scored 7 of 7
+     * against System.Speech's 2 of 7.
+     */
+    if (usesMainProcessCapture()) {
+      // The main process owns the microphone; the renderer opens a stream
+      // purely so the orb has something to react to. Windows shares the
+      // device, so both can read it.
+      const mic = new MicLevel()
+      micRef.current = mic
+      try {
+        await beginListening()
+        setAnalyser(await mic.start())
+
+        // Wait for the second click, which resolves this.
+        await new Promise<void>((resolve) => { stopListeningRef.current = resolve })
+
+        // Detach the orb BEFORE closing the context: the animation loop reads
+        // the AnalyserNode, and reading one whose context has closed touches
+        // freed memory and crashes the renderer.
+        setAnalyser(null)
+        mic.stop()
+        micRef.current = null
+
+        setPhase('thinking')
+        setStatus('Transcribing…')
+        const heardStream = await endListening()
+        if (!heardStream?.text) { setPhase('idle'); setStatus('I did not catch that'); return }
+        await routeHeard(heardStream)
+      } catch (e: any) {
+        setAnalyser(null)
+        mic.stop()
+        micRef.current = null
+        await abortListening()
+        setPhase('idle')
+        setStatus(`listening failed: ${e?.message ?? e}`)
+      }
+      return
+    }
 
     // The orb reacts to the microphone while the main process transcribes.
     const mic = new MicLevel()
@@ -341,8 +441,7 @@ export default function Assistant() {
       micRef.current = null
 
       if (!heard?.text) { setPhase('idle'); setStatus('I did not catch that'); return }
-      setStatus(heard.confidence < 0.4 ? `heard (low confidence): "${heard.text}"` : null)
-      await ask(heard.text)
+      await routeHeard(heard)
     } catch (e: any) {
       setAnalyser(null)   // detach before close — see above
       mic.stop()

@@ -78,8 +78,39 @@ export interface ElectronAPI {
   stopSpeaking?: () => Promise<boolean>
   setVoice?: (id: string) => Promise<TtsInfo>
   /** Resolves to null when nothing was said before the timeout. */
-  listen?: () => Promise<{ text: string; confidence: number } | null>
+  listen?: () => Promise<{
+    text: string
+    /** From the Windows recogniser. Observed values are very low even on good
+     *  transcriptions, so treat it as a hint, not a gate. */
+    confidence: number
+    /** Which grammar produced it — measurement says always 'dictation'. */
+    grammar: string
+    /** Runner-up transcription, for diagnosing a misrecognition. */
+    alternate: string
+  } | null>
   cancelListen?: () => Promise<boolean>
+  /** whisper.cpp — takes a 16kHz mono WAV recorded by the renderer. */
+  transcribe?: (wav: ArrayBuffer) => Promise<{
+    text: string
+    confidence: number
+    grammar: string
+    alternate: string
+  }>
+  cancelTranscribe?: () => Promise<boolean>
+
+  /**
+   * Capture and transcription entirely in the main process (whisper-stream via
+   * SDL2). Preferred over the record-in-renderer path, which crashed Chromium
+   * on sample-rate conversion.
+   */
+  listenStart?: () => Promise<{ started: boolean }>
+  listenStop?: () => Promise<{
+    text: string
+    confidence: number
+    grammar: string
+    alternate: string
+  }>
+  listenCancel?: () => Promise<boolean>
 }
 
 declare global {

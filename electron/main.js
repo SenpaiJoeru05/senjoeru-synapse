@@ -168,6 +168,7 @@ app.on('window-all-closed', () => {
 // the window black with no diagnostics. A subprocess fails with an exit code.
 const tts = require('./tts');
 const stt = require('./stt');
+const whisper = require('./whisper');
 const claude = require('./claude');
 
 // Breadcrumbs for a renderer that dies without a stack. A crashed renderer
@@ -180,7 +181,10 @@ ipcMain.on('trace', (_e, step) => {
 ipcMain.handle('voice-info', async () => ({
   tts: tts.describe(),
   // Windows' recogniser needs no install; presence was verified at build time.
-  stt: { available: process.platform === 'win32', engine: 'Windows System.Speech' },
+  // whisper when installed, Windows as the fallback — the UI reports which.
+  stt: whisper.available()
+    ? whisper.describe()
+    : { available: process.platform === 'win32', engine: 'Windows System.Speech', reason: null },
   claude: claude.describe(),
 }));
 
@@ -223,6 +227,30 @@ ipcMain.handle('voice-set-voice', async (_e, id) => {
 ipcMain.handle('voice-listen', async () => stt.listen({ timeoutSeconds: 12 }));
 
 ipcMain.handle('voice-cancel-listen', async () => { stt.cancel(); return true; });
+
+/**
+ * Preferred recogniser. whisper.cpp got 7 of 7 on the clips Windows
+ * System.Speech got 2 of 7 on, so the renderer records audio and sends it
+ * here; System.Speech stays as the fallback when whisper is not installed.
+ */
+ipcMain.handle('whisper-transcribe', async (_e, wav) => {
+  const text = await whisper.transcribe(Buffer.from(wav));
+  return { text, confidence: 1, grammar: 'whisper', alternate: '' };
+});
+
+ipcMain.handle('whisper-cancel', async () => { whisper.cancel(); return true; });
+
+// Capture lives here too, not in the renderer. Two renderer capture designs
+// crashed Chromium on rate conversion; whisper-stream opens the device at
+// 16kHz natively through SDL2, so nothing resamples.
+ipcMain.handle('listen-start', async () => whisper.startListen());
+
+ipcMain.handle('listen-stop', async () => {
+  const text = await whisper.stopListen();
+  return { text, confidence: 1, grammar: 'whisper-stream', alternate: '' };
+});
+
+ipcMain.handle('listen-cancel', async () => { whisper.cancelListen(); return true; });
 
 ipcMain.handle('open-assistant', async () => {
   openAssistantWindow();

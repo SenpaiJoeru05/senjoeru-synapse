@@ -64,6 +64,49 @@ const VOICE_STYLE = [
 const TIMEOUT_MS = 90_000;
 
 /**
+ * Tools Joeru may use here, and why this list is what it is.
+ *
+ * Print mode cannot prompt for permission — there is no terminal to answer —
+ * so anything not granted up front is refused. That is why asking him to
+ * remember something produced "I hit a permission error on the memory
+ * directory": nothing was granted, so nothing was allowed.
+ *
+ * Read/Write/Edit are granted because memory is the point: Joeru is supposed
+ * to be the one who files what he learns. Glob and Grep let him find the right
+ * memory file instead of guessing a path.
+ *
+ * Bash and Task are deliberately NOT granted. A voice window answering
+ * unattended should not be able to run shell commands or spawn subagents on a
+ * misheard sentence, and neither is needed to write a memory file.
+ *
+ * Note what the safety net is NOT: memory writes are invisible to git here.
+ * `memory/` is gitignored for new files and the tracked ones carry
+ * skip-worktree, so a filed memory does not appear in `git status` and will not
+ * reach the other laptop. The tool list is therefore the whole of the
+ * restriction — review means reading `<kit>/memory/` directly.
+ */
+const ALLOWED_TOOLS = ['Read', 'Write', 'Edit', 'Glob', 'Grep'];
+
+/**
+ * Memory lives in joeru-kit, outside this repo, and Claude Code confines tool
+ * access to the working directory unless told otherwise. Without this he could
+ * not even READ his own memory index — verified: "I cannot read the file —
+ * Claude needs permission to access …/joeru-kit/memory/MEMORY.md".
+ *
+ * Resolved from the workspace config rather than hardcoded, because the kit
+ * sits at a different path on Joel's other laptop.
+ */
+function extraDirs() {
+  try {
+    const { getConfig } = require('../shared/workspace-config');
+    const kit = getConfig()?.paths?.joeruKitDir;
+    return kit && fs.existsSync(kit) ? [kit] : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
  * The real executable, not the .cmd shim.
  *
  * claude.cmd just forwards to bin/claude.exe, and going through cmd.exe broke
@@ -97,6 +140,7 @@ function describe() {
     process.env.USERPROFILE || process.env.HOME || '', '.claude', 'agents', `${AGENT}.md`,
   );
   const hasAgent = fs.existsSync(agentFile);
+  const dirs = extraDirs();
   return {
     available: !!cli,
     cli,
@@ -105,6 +149,10 @@ function describe() {
     // Reported rather than assumed: if joeru-kit has not been built on this
     // machine the agent is missing and answers come back as plain Claude.
     agentInstalled: hasAgent,
+    tools: ALLOWED_TOOLS,
+    // Empty means memory is unreachable and he will say he cannot access it.
+    extraDirs: dirs,
+    canWriteMemory: dirs.length > 0 && ALLOWED_TOOLS.includes('Write'),
     reason: !cli
       ? 'Claude Code CLI not found. Install it with: npm install -g @anthropic-ai/claude-code'
       : !hasAgent
@@ -132,6 +180,8 @@ function ask(question) {
   if (!cli) return Promise.reject(new Error(describe().reason));
 
   return new Promise((resolve, reject) => {
+    const dirs = extraDirs();
+
     // No shell: the exe is invoked directly, so arguments containing spaces
     // need no quoting and cannot be re-split.
     const proc = spawn(cli, [
@@ -140,6 +190,8 @@ function ask(question) {
       // persona and this project's context, which are the reason for using
       // the agent at all.
       '--append-system-prompt', VOICE_STYLE,
+      '--allowedTools', ...ALLOWED_TOOLS,
+      ...(dirs.length ? ['--add-dir', ...dirs] : []),
     ], {
       windowsHide: true,
       // Run from the dashboard repo so any project-level context it picks up is

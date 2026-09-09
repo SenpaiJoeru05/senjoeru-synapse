@@ -44,17 +44,33 @@ try {
   $rec = New-Object System.Speech.Recognition.SpeechRecognitionEngine
   $rec.SetInputToDefaultAudioDevice()
 
+  # Both grammars are loaded, but measurement showed the Choices grammar never
+  # wins: across every test utterance the result came from dictation, and with
+  # only the Choices grammar loaded it rejected everything — including phrases
+  # in it verbatim. So dictation is what actually transcribes, and the intent
+  # router's regex is what turns loose wording into an intent. The command
+  # grammar is kept because it costs nothing and may help on a trained profile,
+  # but nothing depends on it.
   $choices = New-Object System.Speech.Recognition.Choices(@(${choices}))
   $gb = New-Object System.Speech.Recognition.GrammarBuilder
   $gb.Append($choices)
-  $rec.LoadGrammar((New-Object System.Speech.Recognition.Grammar($gb)))
-  $rec.LoadGrammar((New-Object System.Speech.Recognition.DictationGrammar))
+  $cmd = New-Object System.Speech.Recognition.Grammar($gb)
+  $cmd.Name = 'commands'
+  $rec.LoadGrammar($cmd)
+  $dict = New-Object System.Speech.Recognition.DictationGrammar
+  $dict.Name = 'dictation'
+  $rec.LoadGrammar($dict)
 
   $result = $rec.Recognize([TimeSpan]::FromSeconds(${timeoutSeconds}))
   if ($result -eq $null) {
     Write-Output 'SYNAPSE_STT_EMPTY'
   } else {
-    Write-Output ("SYNAPSE_STT_OK|" + [math]::Round($result.Confidence,3) + "|" + $result.Text)
+    # Grammar name and the runner-up are reported so a misrecognition can be
+    # diagnosed from the log instead of guessed at.
+    $g = if ($result.Grammar) { $result.Grammar.Name } else { 'unknown' }
+    $alt = ''
+    if ($result.Alternates.Count -gt 1) { $alt = $result.Alternates[1].Text }
+    Write-Output ("SYNAPSE_STT_OK|" + [math]::Round($result.Confidence,3) + "|" + $g + "|" + $alt + "|" + $result.Text)
   }
   $rec.Dispose()
 } catch {
@@ -107,8 +123,15 @@ function listen({ timeoutSeconds = 12 } = {}) {
         reject(new Error(line.split('|').slice(1).join('|') || 'recogniser error'));
         return;
       }
-      const [, confidence, ...rest] = line.split('|');
-      resolve({ text: rest.join('|').trim(), confidence: Number(confidence) || 0 });
+      // SYNAPSE_STT_OK|confidence|grammar|alternate|text — text last because
+      // it is the only field that can itself contain a pipe.
+      const [, confidence, grammar, alternate, ...rest] = line.split('|');
+      resolve({
+        text: rest.join('|').trim(),
+        confidence: Number(confidence) || 0,
+        grammar: grammar || 'unknown',
+        alternate: (alternate || '').trim(),
+      });
     });
   });
 }
