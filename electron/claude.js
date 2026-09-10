@@ -273,4 +273,150 @@ function cancel() {
   current = null;
 }
 
-module.exports = { ask, cancel, describe, MODEL, AGENT };
+/* ── the Chat tab: a real conversation, not a one-shot ─────────────────────── */
+
+/**
+ * A turn in the Chat tab, on the Claude Code CLI.
+ *
+ * Two things make this different from ask() above, and both are deliberate.
+ *
+ * IT KEEPS A SESSION. `--session-id <uuid>` on the first turn and `--resume` on
+ * every one after it; the CLI persists the conversation itself. Verified in
+ * print mode — a fact given in turn one was recalled in turn two. Assistant
+ * Mode instead re-sends its last four exchanges every time, which is right for
+ * a voice window that refers back a turn or two, and wrong here: Chat sessions
+ * run long, and re-sending the whole history each turn makes input grow
+ * quadratically. Measured on this machine, cache reads were already the single
+ * largest cost component of a CLI call — about $1.01 of a $2.17 request — so
+ * paying to re-read a growing transcript is the expensive way to do this.
+ *
+ * IT DOES NOT PIN A MODEL. ask() forces haiku because you are talking to it and
+ * latency dominates. Here the agent's own declared tier applies: joeru gets
+ * opus, frontend-engineer gets sonnet, from joeru-kit's targets.json. That is
+ * what the tier system is for, and measurement supports it — on a real planning
+ * task all four Opus configurations spotted that SDL capture indices renumber
+ * when a device is plugged in (so a device must be persisted by NAME, not
+ * index) and neither Sonnet configuration did. Pinning a fast model here would
+ * throw that away.
+ *
+ * Tools match ask() exactly — Read, Write, Edit, Glob, Grep. No Bash. Chat is
+ * the defensible place to widen that, since you are watching and can read the
+ * diff, but widening it is a decision to take on purpose rather than a side
+ * effect of moving Chat onto this runner.
+ */
+const CHAT_TIMEOUT_MS = 600_000;
+
+/** Session ids the CLI has already seen, so the next turn resumes instead of colliding. */
+const started = new Set();
+
+/**
+ * Ask within a session. Resolves with the text, and reports tool use as it
+ * happens through `onEvent`.
+ *
+ * stream-json rather than plain text because it carries every tool call with
+ * its full arguments — a Read event names the file, an Edit event carries the
+ * before and after. That is what lets the UI show what the agent is actually
+ * touching instead of asserting that something happened.
+ */
+function chat({ sessionId, agent, text }, onEvent = () => {}) {
+  const cli = findCli();
+  if (!cli) return Promise.reject(new Error(describe().reason));
+
+  const q = String(text || '').trim();
+  if (!q) return Promise.resolve({ text: '', tools: [] });
+  if (!sessionId) return Promise.reject(new Error('a session id is required'));
+
+  const resuming = started.has(sessionId);
+  const dirs = extraDirs();
+
+  return new Promise((resolve, reject) => {
+    const proc = spawn(cli, [
+      '-p',
+      // First turn names the session; later turns continue it.
+      ...(resuming ? ['--resume', sessionId] : ['--session-id', sessionId]),
+      '--agent', agent || AGENT,
+      // No --model: the agent's declared tier decides. See the note above.
+      '--output-format', 'stream-json', '--verbose',
+      '--allowedTools', ...ALLOWED_TOOLS,
+      ...(dirs.length ? ['--add-dir', ...dirs] : []),
+    ], { windowsHide: true, cwd: path.join(__dirname, '..') });
+
+    started.add(sessionId);
+    current = proc;
+
+    const tools = [];
+    let answer = '';
+    let err = '';
+    let buffer = '';
+
+    const timer = setTimeout(() => {
+      try { proc.kill(); } catch { /* gone */ }
+      reject(new Error(`Claude did not finish within ${CHAT_TIMEOUT_MS / 60_000} minutes`));
+    }, CHAT_TIMEOUT_MS);
+
+    /*
+     * stream-json is newline-delimited, and a chunk boundary can fall anywhere
+     * — including mid-object. Parsing per chunk drops events at random under
+     * load, so hold the tail until a newline completes it.
+     */
+    proc.stdout.on('data', (d) => {
+      buffer += d.toString();
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        let event;
+        try { event = JSON.parse(line); } catch { continue; }
+
+        const blocks = event?.message?.content;
+        if (Array.isArray(blocks)) {
+          for (const b of blocks) {
+            if (b.type === 'tool_use') {
+              const entry = { name: b.name, input: b.input, at: Date.now() };
+              tools.push(entry);
+              onEvent({ type: 'tool', ...entry });
+            } else if (b.type === 'text' && b.text) {
+              answer += b.text;
+              onEvent({ type: 'text', text: b.text });
+            }
+          }
+        } else if (event?.type === 'result') {
+          // The result event carries the settled answer; prefer it over the
+          // accumulated deltas, which can include intermediate text.
+          if (typeof event.result === 'string' && event.result.trim()) answer = event.result;
+          onEvent({ type: 'done', costUsd: event.total_cost_usd, turns: event.num_turns });
+        }
+      }
+    });
+
+    proc.stderr.on('data', (d) => { err += d.toString(); });
+
+    proc.on('error', (e) => {
+      clearTimeout(timer);
+      current = null;
+      reject(new Error(`could not start Claude Code: ${e.message}`));
+    });
+
+    proc.on('close', (code, signal) => {
+      clearTimeout(timer);
+      current = null;
+      if (signal) { resolve({ text: answer.trim(), tools, cancelled: true }); return; }
+      if (code !== 0) {
+        const detail = err.trim().split('\n').filter(Boolean).slice(-3).join(' ');
+        reject(new Error(detail || `Claude Code exited ${code}`));
+        return;
+      }
+      resolve({ text: answer.trim(), tools });
+    });
+
+    proc.stdin.on('error', () => {});
+    proc.stdin.end(q);
+  });
+}
+
+/** Forget a session, so a fresh one with the same id starts rather than resumes. */
+function forget(sessionId) {
+  started.delete(sessionId);
+}
+
+module.exports = { ask, chat, forget, cancel, describe, MODEL, AGENT, ALLOWED_TOOLS };

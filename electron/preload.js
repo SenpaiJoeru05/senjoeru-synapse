@@ -35,6 +35,21 @@ contextBridge.exposeInMainWorld('electronAPI', {
   claudeAsk: (question) => ipcRenderer.invoke('claude-ask', question),
   claudeCancel: () => ipcRenderer.invoke('claude-cancel'),
 
+  // The Chat tab on the same CLI, but with a persistent session and the
+  // agent's own model tier rather than a pinned fast one.
+  claudeChat: (args) => ipcRenderer.invoke('claude-chat', args),
+  claudeChatForget: (sessionId) => ipcRenderer.invoke('claude-chat-forget', sessionId),
+  /**
+   * Subscribe to tool activity for the turn in flight. Returns an unsubscribe
+   * function — without one, every mount would add another listener and the
+   * same Read would be reported as many times as the page had been opened.
+   */
+  onClaudeChatEvent: (cb) => {
+    const handler = (_e, payload) => cb(payload);
+    ipcRenderer.on('claude-chat-event', handler);
+    return () => ipcRenderer.removeListener('claude-chat-event', handler);
+  },
+
   // Fire-and-forget: logging must never delay an answer.
   logQuestion: (entry) => ipcRenderer.send('assistant-log', entry),
   assistantInsights: () => ipcRenderer.invoke('assistant-insights'),

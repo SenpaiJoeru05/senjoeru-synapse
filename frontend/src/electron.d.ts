@@ -66,6 +66,33 @@ export interface ElectronAPI {
   claudeAsk?: (question: string) => Promise<string>
   claudeCancel?: () => Promise<boolean>
 
+  /**
+   * A Chat-tab turn on the same CLI, in a persistent session.
+   *
+   * Unlike claudeAsk this pins no model — the agent's declared tier applies —
+   * and the conversation lives in the CLI's own session store, so a follow-up
+   * costs a fraction of the first turn instead of re-sending the transcript.
+   */
+  claudeChat?: (args: { sessionId: string; agent?: string; text: string }) => Promise<{
+    text: string
+    tools: { name: string; input: unknown; at: number }[]
+    cancelled?: boolean
+    /** Set instead of throwing, so the caller can fall back to OpenCode. */
+    error?: string
+  }>
+  /** Drop a session so the next turn starts fresh rather than resuming. */
+  claudeChatForget?: (sessionId: string) => Promise<boolean>
+  /** Live tool activity for the turn in flight. Returns an unsubscribe function. */
+  onClaudeChatEvent?: (cb: (e: {
+    sessionId: string
+    type: 'tool' | 'text' | 'done'
+    name?: string
+    input?: unknown
+    text?: string
+    costUsd?: number
+    turns?: number
+  }) => void) => () => void
+
   logQuestion?: (entry: {
     question: string
     route: 'local' | 'claude' | 'joeru' | 'failed'

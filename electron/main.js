@@ -344,6 +344,35 @@ ipcMain.handle('listen-stop', async () => {
 
 ipcMain.handle('listen-cancel', async () => { whisper.cancelListen(); return true; });
 
+/**
+ * A Chat-tab turn on the Claude Code CLI.
+ *
+ * Tool activity is pushed on a separate channel rather than returned with the
+ * answer: `invoke` resolves once, and the point of streaming is that you see
+ * the Read and the Edit while they happen instead of after. The renderer
+ * correlates events by sessionId, so two Chat windows cannot cross wires.
+ */
+ipcMain.handle('claude-chat', async (event, { sessionId, agent, text }) => {
+  const send = (payload) => {
+    // The window can close mid-turn; a destroyed webContents throws on send.
+    if (!event.sender.isDestroyed()) {
+      event.sender.send('claude-chat-event', { sessionId, ...payload });
+    }
+  };
+  try {
+    return await claude.chat({ sessionId, agent, text }, send);
+  } catch (err) {
+    // Rejecting an invoke loses the message shape the renderer needs to fall
+    // back cleanly, so failure is data rather than an exception.
+    return { text: '', tools: [], error: err.message };
+  }
+});
+
+ipcMain.handle('claude-chat-forget', async (_e, sessionId) => {
+  claude.forget(sessionId);
+  return true;
+});
+
 ipcMain.handle('open-assistant', async () => {
   openAssistantWindow();
   // Park a Piper process now. It loads a 60MB model at startup, and paying
