@@ -373,6 +373,40 @@ app.get('/api/metrics', async (req, res) => {
   }
 });
 
+/**
+ * Change one task's status on the authoritative board.
+ *
+ * Not `POST /api/metrics/tasks`, which looks like the write path and is not:
+ * that writes `metrics/tasks.json`, a file the collector REGENERATES from
+ * `paths.tasksFile` on every poll, so a write there survives until the next
+ * tick and then vanishes. This writes the real board.
+ *
+ * Narrow on purpose — status only, on a task that already exists. Creating,
+ * deleting and editing text stay with the agents; see shared/tasks-write.js
+ * for why the ownership rule changed this far and no further.
+ */
+app.post('/api/tasks/:id/status', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body || {};
+    if (!status) return res.status(400).json({ error: 'status is required' });
+
+    const file = getWorkspaceConfig()?.paths?.tasksFile;
+    if (!file || !fs.existsSync(file)) {
+      return res.status(404).json({ error: `task board not found at ${file || '(unset)'}` });
+    }
+
+    const { setTaskStatus } = require('../shared/tasks-write');
+    const { task, previous } = setTaskStatus(file, id, status);
+    return res.json({ success: true, task, previous });
+  } catch (error) {
+    // A bad status or unknown id is the caller's mistake, not a server fault,
+    // and the difference matters to a UI deciding whether to offer a retry.
+    const clientError = /^(no task with id|unknown status|task board has no)/.test(error.message);
+    return res.status(clientError ? 400 : 500).json({ error: error.message });
+  }
+});
+
 app.post('/api/metrics/:type', async (req, res) => {
   try {
     const { type } = req.params;

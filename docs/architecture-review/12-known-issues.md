@@ -82,7 +82,10 @@ graph and the git collector both read `config.repositories`.
 - **Single-user, single-machine, local-only.** No auth, no remote access, no multi-user support (by design).
 - **Binary agent status** (Working/Idle) — no Reviewing/Testing/Error produced by the collector though the UI has styles for them.
 - **Working detection is repo-directory based** — co-owning agents both light up for the same repo; the collector cannot disambiguate which agent is actually active (e.g. AI Chatbot Engineer + Frontend Engineer both own `chat-widget`).
-- **Task board is read-only in the UI** — no create/edit/complete from Synapse; all writes happen in `.claude/tasks.json`.
+- **Task board is read-only in the UI except for status** — no create, delete or
+  edit from Synapse; those writes still happen in the board file, by agents.
+  Status is now changeable (`POST /api/tasks/:id/status`), which is what lets
+  Assistant Mode complete a task by voice. See 05-task-system.md.
 - **No historical data** — only current state is stored; no time-series persistence beyond the 7-day token window derived live from transcripts.
 - **Two WebSocket connections per client** to the same `/ws` endpoint (metrics hook + graph hook).
 - **Git introspection depends on `git` being on the collector's PATH.** `collectGit()` catches the spawn failure and logs it to the collector console only, so a missing or newly-installed git shows as an empty Git page with no in-app error. A collector started before git was installed keeps failing until restarted.

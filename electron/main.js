@@ -1,7 +1,24 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
+const {
+  app, BrowserWindow, ipcMain, globalShortcut, screen,
+} = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
+const windowState = require('./assistant-window-state');
 const isDev = !app.isPackaged;
+
+/**
+ * Hotkey to summon the Assistant window from anywhere.
+ *
+ * A global shortcut rather than a wake word, which is the trade this project
+ * already reasoned through: always-on listening needs Porcupine or equivalent,
+ * and a keypress delivers most of the benefit for none of the cost — no model,
+ * no permanently open microphone, and no false triggers from a meeting.
+ *
+ * Ctrl+Alt+J is chosen for being unclaimed. Ctrl+Shift+J would have been the
+ * obvious mnemonic and is DevTools in every Chromium app, including this one;
+ * registering it globally would take it away everywhere.
+ */
+const HOTKEY = process.env.SYNAPSE_ASSISTANT_HOTKEY || 'Control+Alt+J';
 
 let mainWindow;
 let assistantWindow = null;
@@ -87,10 +104,11 @@ function openAssistantWindow() {
   }
 
   assistantWindow = new BrowserWindow({
-    width: 440,
-    height: 560,
-    minWidth: 360,
-    minHeight: 420,
+    // Reopened where it was last left, when that is still a place a display
+    // can show. See assistant-window-state.js.
+    ...windowState.initialBounds(screen),
+    minWidth: windowState.MIN.width,
+    minHeight: windowState.MIN.height,
     // frame:false needs the renderer to supply its own drag region and close
     // button — see Assistant.tsx.
     frame: false,
@@ -129,9 +147,60 @@ function openAssistantWindow() {
     if (level >= 3) console.error(`[assistant:console] ${message}`);
   });
 
+  windowState.track(assistantWindow);
+
   assistantWindow.on('closed', () => {
     assistantWindow = null;
   });
+}
+
+/**
+ * What the hotkey does — summon, or dismiss if it is already in front.
+ *
+ * A toggle rather than a plain show, because the window is alwaysOnTop: with
+ * show-only, the key that conjures it gives you no way to put it away again
+ * without reaching for the mouse, which defeats the point of a hotkey.
+ *
+ * Hidden rather than closed, so the conversation so far survives. Closing
+ * destroys the renderer and with it the history that makes "mark that one
+ * complete" mean anything.
+ */
+function toggleAssistantWindow() {
+  if (assistantWindow && !assistantWindow.isDestroyed()) {
+    if (assistantWindow.isVisible() && assistantWindow.isFocused()) {
+      assistantWindow.hide();
+      return;
+    }
+    assistantWindow.show();
+    assistantWindow.focus();
+    return;
+  }
+  openAssistantWindow();
+}
+
+/**
+ * Register the hotkey, and say so either way.
+ *
+ * `register` returns false when another application already owns the
+ * combination, and it does so silently — without this line the key would
+ * simply do nothing and look like a bug in this app rather than a collision.
+ */
+function registerHotkey() {
+  let ok = false;
+  try {
+    ok = globalShortcut.register(HOTKEY, toggleAssistantWindow);
+  } catch (err) {
+    console.error(`[main] hotkey ${HOTKEY} is not a valid accelerator: ${err.message}`);
+    return;
+  }
+  if (ok) {
+    console.log(`[main] Assistant hotkey: ${HOTKEY}`);
+  } else {
+    console.error(
+      `[main] hotkey ${HOTKEY} is already taken by another application. `
+      + 'Set SYNAPSE_ASSISTANT_HOTKEY to something else.',
+    );
+  }
 }
 
 app.whenReady().then(() => {
@@ -143,6 +212,7 @@ app.whenReady().then(() => {
     startCollector();
   }
   createWindow();
+  registerHotkey();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -181,6 +251,12 @@ const claude = require('./claude');
  * indicator stays on after the app is gone.
  */
 app.on('before-quit', () => {
+  // A global shortcut outlives the window but not the process; unregistering
+  // is still right so a crash-and-restart cycle cannot leave a stale claim.
+  try { globalShortcut.unregisterAll(); } catch { /* quitting anyway */ }
+  // The bounds writer is debounced, so a move immediately before quitting
+  // would otherwise never reach disk.
+  try { windowState.flush(assistantWindow); } catch { /* quitting anyway */ }
   try { tts.shutdown(); } catch { /* quitting anyway */ }
   try { whisper.cancelListen(); } catch { /* quitting anyway */ }
   try { whisper.cancel(); } catch { /* quitting anyway */ }

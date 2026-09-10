@@ -20,6 +20,10 @@ import type { AssistantInsights } from '../electron'
 import { currentState, ground, type Exchange } from '../lib/grounding'
 import { acknowledgement } from '../lib/acknowledge'
 import {
+  parse as parseTaskAction, apply as applyTask, confirmationFor, isYes, isNo,
+  type ActionParse as TaskAction, type TaskRef, type TaskStatus,
+} from '../lib/task-actions'
+import {
   say, hush, hear, stopHearing, voiceAvailable, disposeVoice, MicLevel,
   usesMainProcessCapture, beginListening, endListening, abortListening,
   type Heard,
@@ -194,6 +198,14 @@ export default function Assistant() {
    * it — the one turn that matters most for "mark that as complete".
    */
   const recentRef = useRef<Exchange[]>([])
+  /**
+   * A task change that has been understood but NOT performed.
+   *
+   * Held until an explicit yes. Every other intent only reads, so a
+   * misrecognition costs a moment; this one writes, and "mark task three
+   * complete" heard as task eight is not undone by saying no afterwards.
+   */
+  const pendingRef = useRef<{ task: TaskRef; status: TaskStatus } | null>(null)
   const sessionRef = useRef<string | null>(null)
   const busy = phase !== 'idle'
 
@@ -280,6 +292,43 @@ export default function Assistant() {
     recentRef.current = [...recentRef.current, { question, answer }].slice(-8)
   }, [])
 
+  /** Perform a confirmed change. Reports failure rather than throwing. */
+  const applyTaskStatus = useCallback(async (id: string, status: TaskStatus) => {
+    try {
+      await applyTask(id, status)
+      return true
+    } catch (e: any) {
+      setStatus(`could not update the task: ${e?.response?.data?.error ?? e?.message ?? e}`)
+      return false
+    }
+  }, [])
+
+  /**
+   * Turn a parsed command into something to say — and, when it is
+   * unambiguous, arm the confirmation.
+   *
+   * Arming here rather than in the parser keeps the parser pure: it decides
+   * what was meant, this decides what happens next.
+   */
+  const describeAction = useCallback(async (
+    // Never called with kind:none — the caller has already returned by then,
+    // and saying so in the type is what lets the notFound branch below read
+    // its `described` field without a cast.
+    action: Exclude<TaskAction, { kind: 'none' }>,
+  ): Promise<string> => {
+    if (action.kind === 'ready') {
+      pendingRef.current = { task: action.task, status: action.status }
+      return confirmationFor(action.task, action.status)
+    }
+    if (action.kind === 'ambiguous') {
+      // Named, not counted: "which one" is unanswerable without hearing the
+      // options, and the screen carries the full list alongside.
+      const names = action.candidates.slice(0, 3).map((c) => c.title).join(', or ')
+      return `There are ${action.candidates.length} tasks ${action.described}. Which one — ${names}?`
+    }
+    return `I could not find ${action.described} to change.`
+  }, [])
+
   async function ensureSession(): Promise<string> {
     if (sessionRef.current) return sessionRef.current
     const s = await api.joeruCreateSession('Assistant Mode (voice)')
@@ -309,6 +358,74 @@ export default function Assistant() {
     let acked: Promise<void> | null = null
 
     try {
+      /*
+       * A pending confirmation owns the next thing said, whatever it is.
+       *
+       * Checked before anything else so "yes" cannot be classified as small
+       * talk and answered with "anytime" while the change is silently dropped.
+       * Anything that is not a clear yes or no cancels and is then treated as
+       * a fresh question — an unclear reply must never count as consent.
+       */
+      const pending = pendingRef.current
+      if (pending) {
+        pendingRef.current = null
+        if (isYes(q)) {
+          const done = await applyTaskStatus(pending.task.id, pending.status)
+          const said = done
+            ? `Done. ${pending.task.title} is now ${pending.status.toLowerCase()}.`
+            : `I could not update ${pending.task.title}.`
+          log('local', 'task-action')
+          remember(q, said)
+          setTurns((t) => [...t.slice(0, -1), {
+            question: q,
+            answer: { intent: 'chat', speech: said, lines: [], source: 'local' },
+          }])
+          await speakAnswer(said)
+          return
+        }
+        if (isNo(q)) {
+          const said = 'Left as it was.'
+          log('local', 'task-action')
+          remember(q, said)
+          setTurns((t) => [...t.slice(0, -1), {
+            question: q,
+            answer: { intent: 'chat', speech: said, lines: [], source: 'local' },
+          }])
+          await speakAnswer(said)
+          return
+        }
+        // Neither — fall through and answer it as a question, having cancelled.
+        setStatus('Cancelled the change.')
+      }
+
+      /*
+       * Task commands, before the read-only intents.
+       *
+       * Their keywords overlap: "mark the review task complete" contains
+       * "review", and "complete" would otherwise never be reached. A command
+       * has to be recognised as a command before anything tries to read it as
+       * a question.
+       */
+      const action = await parseTaskAction(q)
+      if (action.kind !== 'none') {
+        const said = await describeAction(action)
+        log('local', 'task-action')
+        remember(q, said)
+        setTurns((t) => [...t.slice(0, -1), {
+          question: q,
+          answer: {
+            intent: 'chat',
+            speech: said,
+            lines: action.kind === 'ambiguous'
+              ? action.candidates.map((c) => `${c.id} · ${c.status} · ${c.title}`)
+              : [],
+            source: 'local',
+          },
+        }])
+        await speakAnswer(said)
+        return
+      }
+
       const local = await answerLocally(q)
       if (local) {
         log('local', local.intent)
@@ -411,7 +528,7 @@ export default function Assistant() {
       }])
       setPhase('idle')
     }
-  }, [speakAnswer, speakAck, remember])
+  }, [speakAnswer, speakAck, remember, applyTaskStatus, describeAction])
 
   /**
    * What to do with a transcription, shared by both recognisers.

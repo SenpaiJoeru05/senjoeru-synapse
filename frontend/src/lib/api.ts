@@ -39,6 +39,18 @@ export const api = {
     return response.data
   },
 
+  /**
+   * Change one task's status on the authoritative board.
+   *
+   * Note this is NOT updateMetric('tasks', …). That writes metrics/tasks.json,
+   * which the collector regenerates from the real board on every poll — so a
+   * write there appears to work and is gone within seconds.
+   */
+  async setTaskStatus(id: string, status: string): Promise<any> {
+    const response = await axios.post(`${API_BASE_URL}/tasks/${encodeURIComponent(id)}/status`, { status })
+    return response.data
+  },
+
   async getSettings(): Promise<any> {
     const response = await axios.get(`${API_BASE_URL}/settings`)
     return response.data

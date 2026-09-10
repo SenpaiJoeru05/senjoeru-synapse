@@ -120,7 +120,15 @@ Per-repo work within a multi-repo task is tracked in the `repos[]` array — eac
 
 ## Current limitations (state, not recommendations)
 
-- **Read-only mirror** — no way to create/edit/complete a task from the dashboard; all writes happen in `.claude/tasks.json` by agents.
+- **Almost a read-only mirror** — authoring (create, delete, retitle, notes) still
+  happens only in the board file, written by agents. The single exception is
+  **status**: `POST /api/tasks/:id/status` changes the status of a task that
+  already exists, writing the authoritative board atomically via
+  `shared/tasks-write.js`. Added so Assistant Mode could act on "mark that one
+  complete" without a 13-second model call to edit one string, and kept that
+  narrow so a mistake cannot destroy anyone's work. Note this makes Synapse the
+  *second* writer of that file, alongside the agents — the writer documents the
+  read-modify-write race that implies.
 - **Heuristic fallback** — memory-derived tasks (`source: "memory-files"`) have guessed status/progress and assign everything to "Claude Agent".
 - **No history** — only the current board state is stored; there is no task audit trail or completed-task archive.
 - **`progress` is self-reported** by the authoring agent, not verified.
