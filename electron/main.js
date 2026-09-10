@@ -171,6 +171,22 @@ const stt = require('./stt');
 const whisper = require('./whisper');
 const claude = require('./claude');
 
+/*
+ * Release the voice subprocesses on the way out.
+ *
+ * `window-all-closed` above cannot do this — it is registered before these
+ * requires — and neither process is a child that dies with the window: the
+ * parked Piper holds a 60MB model resident, and whisper-stream holds the
+ * MICROPHONE, which is the one that matters. Leaving it running means the mic
+ * indicator stays on after the app is gone.
+ */
+app.on('before-quit', () => {
+  try { tts.shutdown(); } catch { /* quitting anyway */ }
+  try { whisper.cancelListen(); } catch { /* quitting anyway */ }
+  try { whisper.cancel(); } catch { /* quitting anyway */ }
+  try { stt.cancel(); } catch { /* quitting anyway */ }
+});
+
 // Breadcrumbs for a renderer that dies without a stack. A crashed renderer
 // takes its console with it, but an IPC message already received by the main
 // process survives — so the last line printed is the step it died on.
@@ -254,6 +270,11 @@ ipcMain.handle('listen-cancel', async () => { whisper.cancelListen(); return tru
 
 ipcMain.handle('open-assistant', async () => {
   openAssistantWindow();
+  // Park a Piper process now. It loads a 60MB model at startup, and paying
+  // that on the first answer was ~800ms of silence before Joeru spoke. Done
+  // here rather than at app start so someone who never opens this window never
+  // carries the process.
+  tts.warm();
   return true;
 });
 
