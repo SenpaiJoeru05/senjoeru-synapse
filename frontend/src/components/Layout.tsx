@@ -1,7 +1,10 @@
 import { Outlet, Link, useLocation } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import AttentionNotifier from './AttentionNotifier'
+import { usePresentationMode, setOn as setPresentation } from '@/lib/presentation'
 import {
+  Eye,
+  EyeOff,
   LayoutDashboard,
   ListTodo,
   GitBranch,
@@ -51,6 +54,7 @@ const navSections = [
 ]
 
 export default function Layout() {
+  const presenting = usePresentationMode()
   const location = useLocation()
 
   return (
@@ -124,7 +128,32 @@ export default function Layout() {
         </nav>
 
         {/* Footer */}
-        <div className="px-4 py-3 border-t border-white/10">
+        <div className="px-4 py-3 border-t border-white/10 space-y-2">
+          {/*
+            Presentation mode. In the sidebar rather than a settings page,
+            because it is reached in the seconds before a screen share starts
+            and a toggle you have to go and find is a toggle you forget.
+
+            It says what it does in both states, and stays visibly ON — this
+            hides real figures, so leaving it on by accident and reading a mask
+            as a zero is the confusion worth designing against.
+          */}
+          <button
+            onClick={() => setPresentation(!presenting)}
+            title={presenting
+              ? 'Spend and budgets are hidden. Everyone sees this screen the same way, you included.'
+              : 'Hide spend and budgets before sharing your screen'}
+            className={`w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-[11px] transition-colors ${
+              presenting
+                ? 'bg-warning/20 text-warning hover:bg-warning/30'
+                : 'text-gray-500 hover:text-gray-300 hover:bg-white/5'
+            }`}
+          >
+            {presenting ? <EyeOff className="w-3.5 h-3.5 shrink-0" /> : <Eye className="w-3.5 h-3.5 shrink-0" />}
+            <span className="font-medium truncate">
+              {presenting ? 'Figures hidden' : 'Hide figures'}
+            </span>
+          </button>
           <p className="text-[10px] text-gray-500 text-center">v1.0 · Local Only</p>
         </div>
       </motion.aside>

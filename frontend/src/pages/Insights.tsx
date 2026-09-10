@@ -5,6 +5,7 @@ import {
 } from 'recharts'
 import { TrendingUp, CheckCircle, GitCommit, DollarSign, Clock, RefreshCw, Activity, CalendarDays, Users } from 'lucide-react'
 import { api } from '@/lib/api'
+import { money, usePresentationMode } from '@/lib/presentation'
 import { useTasks } from '@/lib/realtime'
 
 const AXIS = { stroke: '#6b7280', tick: { fill: '#9ca3af', fontSize: 11 }, axisLine: { stroke: '#374151' }, tickLine: false }
@@ -156,6 +157,8 @@ function ContributionMatrix({ tasks }: { tasks: any[] }) {
 }
 
 export default function Insights() {
+  // Subscribe so a presentation-mode change re-renders the figures below.
+  usePresentationMode()
   const [data, setData] = useState<any | null>(null)
   const [loading, setLoading] = useState(true)
   const tasks = useTasks()
@@ -189,7 +192,7 @@ export default function Insights() {
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-5">
         <Stat icon={CheckCircle} color="text-success" label="Completed" value={String(velocity.totalCompleted)} sub={`in ${data.windowDays} days`} />
         <Stat icon={GitCommit} color="text-emerald-400" label="Commits" value={String(velocity.totalCommits)} sub={`in ${data.windowDays} days`} />
-        <Stat icon={DollarSign} color="text-warning" label="Total AI cost" value={`$${(cost.totalCost || 0).toFixed(2)}`} sub="all-time (recorded)" />
+        <Stat icon={DollarSign} color="text-warning" label="Total AI cost" value={money(cost.totalCost)} sub="all-time (recorded)" />
         <Stat icon={Clock} color="text-primary" label="Sessions" value={String(sessions.total)} sub={`${sessions.activeNow} active · avg ${sessions.avgDurationMin}m`} />
       </div>
 

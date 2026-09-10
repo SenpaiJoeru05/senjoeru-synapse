@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom'
 import StatCard from '@/components/StatCard'
 import NotificationBell from '@/components/NotificationBell'
 import { api } from '@/lib/api'
+import { money, hidden, usePresentationMode } from '@/lib/presentation'
 import { useRealtime, useTasks } from '@/lib/realtime'
 import { repoBadge } from '@/lib/repo-color'
 import { formatBytes, formatNumber } from '@/lib/utils'
@@ -121,8 +122,8 @@ function UsageStat({ label, value, icon: Icon, limit }: {
           <Icon className="w-3.5 h-3.5" />{label}
         </div>
         <div className="flex items-baseline gap-1">
-          <span className={`text-lg font-bold ${valueColor}`}>${value.toFixed(2)}</span>
-          {limit && <span className="text-xs text-gray-500">/ ${limit.toFixed(0)}</span>}
+          <span className={`text-lg font-bold ${valueColor}`}>{money(value)}</span>
+          {limit && <span className="text-xs text-gray-500">/ {hidden(`$${limit.toFixed(0)}`)}</span>}
         </div>
       </div>
       {limit ? (
@@ -175,6 +176,8 @@ function ActivityIcon({ event }: { event: any }) {
 // ── Overview ─────────────────────────────────────────────────────────────────
 
 export default function Overview() {
+  // Subscribe so a presentation-mode change re-renders the figures below.
+  usePresentationMode()
   const navigate = useNavigate()
   // Live metrics + host health arrive over the shared WebSocket — no polling.
   const { metrics, health, ready } = useRealtime() as {
@@ -316,7 +319,7 @@ export default function Overview() {
         />
         <StatCard
           title="Cost Today"
-          value={today > 0 ? `$${today.toFixed(2)}` : '$0.00'}
+          value={money(today)}
           icon={DollarSign} delay={0.15} showMiniChart
           miniChart={metrics?.tokens?.daily?.slice(-7).map((d: any) => d.cost) ?? []}
         />

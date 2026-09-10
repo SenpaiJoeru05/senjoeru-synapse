@@ -1,3 +1,5 @@
+import { isOn as presentationOn } from './presentation'
+
 /**
  * Turning data into something a person would actually say.
  *
@@ -131,6 +133,16 @@ export function phraseItem(item: AttentionItem): string {
   if (item?.kind === 'budget') {
     const nums = String(item.detail ?? '').match(/\$([\d.,]+)\s*\/\s*\$([\d.,]+)/)
     const scope = /hour/i.test(title) ? 'this hour' : 'this week'
+    /*
+     * The fact survives presentation mode; the amount does not.
+     *
+     * These clauses are read aloud, and being over budget is still worth
+     * hearing during a call — it is the figure that is nobody else's business.
+     * Dropping the item entirely would hide a real alert to protect a number.
+     */
+    if (presentationOn()) {
+      return `you're over the AI budget ${scope}`
+    }
     if (nums) {
       const spent = Number(nums[1].replace(/,/g, ''))
       const limit = Number(nums[2].replace(/,/g, ''))

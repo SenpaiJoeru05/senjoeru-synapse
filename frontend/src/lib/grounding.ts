@@ -12,6 +12,7 @@
  * is giving it the numbers and telling it to say so when they are absent.
  */
 import { api } from './api'
+import { isOn as presentationOn } from './presentation'
 
 /** Compact enough to prepend to every question without meaningful cost. */
 export async function currentState(): Promise<string> {
@@ -29,7 +30,14 @@ export async function currentState(): Promise<string> {
     lines.push(`Attention queue (${items.length} item${items.length === 1 ? '' : 's'}):`)
     if (!items.length) lines.push('  (empty)')
     for (const i of items) {
-      lines.push(`  - [${i.severity}] ${i.kind}: ${i.title}${i.detail ? ` (${i.detail})` : ''}`)
+      /*
+       * A budget item's `detail` is "$297.28 / $50.00 (595%)" — the exact
+       * figures, inside the block the model is told to answer from. Masking
+       * the spend line below and leaving this would have leaked the same
+       * numbers by another route, and the model would have read them out.
+       */
+      const detail = presentationOn() && i.kind === 'budget' ? '' : i.detail
+      lines.push(`  - [${i.severity}] ${i.kind}: ${i.title}${detail ? ` (${detail})` : ''}`)
     }
   } else {
     lines.push('Attention queue: UNAVAILABLE')
@@ -51,7 +59,11 @@ export async function currentState(): Promise<string> {
     lines.push('Task board: UNAVAILABLE')
   }
 
-  if (costs) {
+  // Presentation mode: the model must not be handed figures it would then
+  // read out loud. The fact that spend exists is fine; the amounts are not.
+  if (presentationOn()) {
+    lines.push('Spend: HIDDEN (presentation mode) — do not state or estimate any amount')
+  } else if (costs) {
     lines.push(`Spend: $${Number(costs.today ?? 0).toFixed(2)} today, `
       + `$${Number(costs.weekly ?? 0).toFixed(2)} this week, `
       + `$${Number(costs.monthly ?? 0).toFixed(2)} this month`)

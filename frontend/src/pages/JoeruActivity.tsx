@@ -5,6 +5,7 @@ import {
   CornerDownRight, Clock, Coins, MessagesSquare,
 } from 'lucide-react'
 import { useMetric } from '@/lib/realtime'
+import { money, usePresentationMode } from '@/lib/presentation'
 
 interface Session {
   id: string
@@ -174,6 +175,8 @@ function BarRow({ label, value, max, hint }: {
 /* ── page ──────────────────────────────────────────────────────────────────── */
 
 export default function JoeruActivity() {
+  // Subscribe so a presentation-mode change re-renders the figures below.
+  usePresentationMode()
   const data = useMetric('opencode')
 
   const sessions: Session[] = data?.sessions ?? []
@@ -233,7 +236,7 @@ export default function JoeruActivity() {
         <Stat icon={Bot} label="Messages" value={totals.messages} color="text-violet-400" />
         <Stat icon={Wrench} label="Tool calls" value={totals.toolCalls}
               sub={`${sum(tools, PRODUCING)} produced changes`} color="text-sky-400" />
-        <Stat icon={Coins} label="Cost" value={`$${(totals.cost ?? 0).toFixed(2)}`}
+        <Stat icon={Coins} label="Cost" value={money(totals.cost)}
               sub="free tier" color="text-emerald-400" />
       </div>
 

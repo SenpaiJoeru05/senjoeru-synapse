@@ -17,6 +17,7 @@ import { api } from './api'
 import {
   approxMoney, moneyAdjective, overBy, phraseItem, spokenNumber, vary,
 } from './phrasing'
+import { isOn as presentationOn } from './presentation'
 
 export type Intent = 'status' | 'next' | 'spend' | 'broken' | 'chat' | 'ask'
 
@@ -395,6 +396,23 @@ async function answerSpend(): Promise<Answer> {
       intent: 'spend',
       speech: 'I could not read the cost metrics.',
       lines: ['costs.json unavailable — is the collector running?'],
+      source: 'local',
+    }
+  }
+
+  /*
+   * Presentation mode silences this answer rather than masking it.
+   *
+   * Hiding the figures on screen would achieve nothing here: this answer is
+   * SPOKEN, and a call picks up the speakers. Masking the text while Piper
+   * reads "two hundred and ninety-seven dollars" aloud would be the illusion
+   * of privacy — worse than no feature, because you would rely on it.
+   */
+  if (presentationOn()) {
+    return {
+      intent: 'spend',
+      speech: "Figures are hidden while you're presenting.",
+      lines: ['Spend hidden — turn off "Figures hidden" in the sidebar to see it.'],
       source: 'local',
     }
   }
