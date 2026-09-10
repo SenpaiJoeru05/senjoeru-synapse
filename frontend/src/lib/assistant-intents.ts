@@ -14,6 +14,9 @@
  * not from imagined ones.
  */
 import { api } from './api'
+import {
+  approxMoney, moneyAdjective, overBy, phraseItem, spokenNumber, vary,
+} from './phrasing'
 
 export type Intent = 'status' | 'next' | 'spend' | 'broken' | 'chat' | 'ask'
 
@@ -128,84 +131,29 @@ function answerChat(question: string): Answer {
   }
 }
 
-/**
- * These strings are read aloud, so they are written as speech rather than as a
- * status line. Two rules do most of the work:
+/*
+ * ── The answers ─────────────────────────────────────────────────────────────
  *
- *   Spell small numbers out. A TTS engine reads "4 completed" as a fragment
- *   and often clips the digit; "four" scans as part of the sentence.
+ * Every `speech` below is read aloud, so it is written as speech. Money and
+ * ratios are phrased by ./phrasing; what follows decides WHICH facts to say.
  *
- *   Join with conjunctions, not full stops. "4 completed. 2 items need
- *   attention." is telegraphic — every period is a hard stop, which is what
- *   makes a synthetic voice sound like a robot reading a table. Commas and
- *   "and" give it the prosody of a spoken clause.
+ * That choice is the whole game, and this file used to get it backwards. The
+ * rule here was "join with conjunctions, not full stops", on the theory that
+ * periods are hard stops and sound telegraphic. Followed honestly it produced
+ * "Nothing's in progress, one task waiting, fifteen complete, and two items
+ * need your attention" — four counts in one breath, which is a table being
+ * dictated, and the comma-joining was not the problem.
+ *
+ * The real rule is fewer FACTS, not fewer full stops: lead with the one that
+ * matters, allow at most one follow-up in a second short sentence, and leave
+ * everything else in `lines` for the screen, where scanning is cheap.
  */
-const WORDS = [
-  'zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight',
-  'nine', 'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen',
-  'sixteen', 'seventeen', 'eighteen', 'nineteen', 'twenty',
-]
-
-/** Words up to twenty, digits above — "thirty-seven tasks" is rarer than useful. */
-export function spokenNumber(n: number): string {
-  return n >= 0 && n <= 20 && Number.isInteger(n) ? WORDS[n] : String(n)
-}
-
-/**
- * "$67.50" is read as "dollar sixty seven point five" by most engines.
- *
- * Digits throughout, deliberately — spelling only the small half produced
- * "124 dollars and sixteen cents", which is worse than either convention.
- * TTS reads bare numerals in a money phrase correctly.
- */
-export function spokenMoney(n: number): string {
-  const dollars = Math.floor(n)
-  const cents = Math.round((n - dollars) * 100)
-  const d = `${dollars} dollar${dollars === 1 ? '' : 's'}`
-  // "66 dollars 66" is ambiguous out loud; name the unit.
-  return cents ? `${d} and ${cents} cent${cents === 1 ? '' : 's'}` : d
-}
-
-/**
- * Turns a dashboard detail string into something speakable.
- *
- * These fields are written for the eye — "$124.16 / $50.00 (248%)" — and a TTS
- * engine reads that as "dollar one two four point one six slash dollar fifty".
- * The screen still shows the original; only the spoken copy is rewritten.
- */
-export function speakable(detail: string): string {
-  return String(detail)
-    // $1,234.56 -> 1234 dollars and 56 cents
-    .replace(/\$([\d,]+)(?:\.(\d{2}))?/g, (_m, whole: string, cents?: string) => {
-      const n = Number(whole.replace(/,/g, ''))
-      const base = `${n} dollar${n === 1 ? '' : 's'}`
-      const c = cents ? Number(cents) : 0
-      return c ? `${base} and ${c} cent${c === 1 ? '' : 's'}` : base
-    })
-    .replace(/\((\d+(?:\.\d+)?)%\)/g, ', $1 percent')
-    .replace(/(\d+(?:\.\d+)?)%/g, '$1 percent')
-    .replace(/\s*\/\s*/g, ' of ')
-    .replace(/\s{2,}/g, ' ')
-    // The substitutions above can leave " ," where a slash preceded a bracket,
-    // and a space before a comma becomes an audible stumble.
-    .replace(/\s+([,.])/g, '$1')
-    .trim()
-}
 
 /** Speech starts a sentence; the clauses are written to read mid-sentence. */
 const capitalise = (s: string) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s)
 
 const plural = (n: number, one: string, many = one + 's') =>
   `${spokenNumber(n)} ${n === 1 ? one : many}`
-
-/** Joins clauses the way a person would: "a, b, and c". */
-function sentence(clauses: string[]): string {
-  const parts = clauses.filter(Boolean)
-  if (!parts.length) return ''
-  if (parts.length === 1) return `${parts[0]}.`
-  if (parts.length === 2) return `${parts[0]}, and ${parts[1]}.`
-  return `${parts.slice(0, -1).join(', ')}, and ${parts[parts.length - 1]}.`
-}
 
 /** Highest severity first, so the spoken headline is the thing that matters. */
 const RANK: Record<string, number> = { high: 0, medium: 1, low: 2 }
@@ -225,19 +173,34 @@ async function answerNext(): Promise<Answer> {
     }
   }
 
-  const top = items[0]
+  // One item spoken properly, and a count for the rest. The screen carries the
+  // list; reading more than one aloud is where it starts sounding like a
+  // machine working through a queue.
+  const top = phraseItem(items[0])
   const rest = items.length - 1
-  // Headline plus a count; the screen carries the rest. Reading a list aloud
-  // is unbearable past about three items. Phrased as one clause so it does not
-  // land as three clipped fragments.
-  const detail = top.detail ? ` — ${speakable(top.detail)}` : ''
-  const speech = rest > 0
-    ? `${plural(items.length, 'thing')} need your attention. The main one is ${top.title}${detail}.`
-    : `One thing needs your attention: ${top.title}${detail}.`
+
+  /*
+   * The count, then the item as its own sentence.
+   *
+   * "The bigger one is ${top}" collided with the clause phraseItem returns and
+   * produced "The bigger one is your AI spend this week is about 300 dollars"
+   * — two verbs, because the template assumed a noun and got a sentence. Left
+   * standing on its own the clause needs no grammatical join at all, which is
+   * both correct and how someone would actually say it.
+   */
+  const lead = rest > 0
+    ? vary('next.lead', [
+      `${plural(items.length, 'thing')} need a look`,
+      `${plural(items.length, 'thing')} could use your attention`,
+      `${plural(items.length, 'thing')} outstanding`,
+    ])
+    : vary('next.one', ['One thing', 'Just one thing'])
+
+  const speech = `${capitalise(lead)}. ${capitalise(top)}.`
 
   return {
     intent: 'next',
-    speech: capitalise(speech.trim()),
+    speech: speech.trim(),
     lines: items.slice(0, 8).map((i: any) =>
       `[${i.severity}] ${i.title}${i.detail ? ` — ${i.detail}` : ''}`),
     source: 'local',
@@ -265,25 +228,57 @@ async function answerStatus(): Promise<Answer> {
     }
   }
 
-  // One flowing sentence rather than a list of fragments. Reading the titles
-  // of in-progress work aloud is the useful part; the rest is counts.
-  const clauses: string[] = []
-
+  /*
+   * Lead with the state of play, then at most one follow-up.
+   *
+   * The old version joined four counts with commas — in-progress, waiting,
+   * complete, attention — which is a table read aloud. The completed total is
+   * the first casualty: fifteen finished tasks are not news, they are the pile
+   * behind you, and they belong on screen. What matters spoken is what is
+   * moving, what is stuck, and whether anything wants you.
+   */
+  let headline: string
   if (working.length === 1) {
-    clauses.push(`you're working on ${working[0].title}`)
+    headline = `${vary('status.working', [
+      "You're working on", 'In progress:', 'Currently on',
+    ])} ${working[0].title}`
   } else if (working.length > 1) {
-    clauses.push(`${plural(working.length, 'task')} are in progress`)
+    headline = `${capitalise(plural(working.length, 'task'))} in progress`
+  } else if (!pending.length) {
+    // Nothing moving and nothing queued — here the completed count IS the news.
+    headline = vary('status.clear', [
+      `Everything's done — ${plural(done.length, 'task')} complete`,
+      `All clear, ${plural(done.length, 'task')} finished`,
+      `Nothing outstanding — all ${plural(done.length, 'task')} complete`,
+    ])
   } else {
-    clauses.push("nothing's in progress at the moment")
+    headline = vary('status.idle', [
+      "Nothing's in progress right now",
+      'Nothing being worked on at the moment',
+    ])
   }
 
-  if (pending.length) clauses.push(`${plural(pending.length, 'task')} waiting`)
-  if (done.length) clauses.push(`${plural(done.length, 'task')} complete`)
-  if (needs) clauses.push(`${plural(needs, 'item')} ${needs === 1 ? 'needs' : 'need'} your attention`)
+  const follow: string[] = []
+  if (pending.length) {
+    follow.push(`${plural(pending.length, 'task')} ${pending.length === 1 ? 'is' : 'are'} waiting on you`)
+  }
+  if (needs) {
+    follow.push(vary('status.needs', [
+      `${plural(needs, 'thing')} ${needs === 1 ? 'needs' : 'need'} a look`,
+      `${plural(needs, 'thing')} could use your attention`,
+    ]))
+  }
 
   return {
     intent: 'status',
-    speech: capitalise(sentence(clauses)),
+    // A full stop between them, not a comma: two short sentences are how this
+    // is spoken, and a comma-spliced chain is what made it sound recited. Each
+    // is capitalised in turn — capitalising only the headline left "right now.
+    // one task is waiting", which a TTS voice reads with the wrong cadence.
+    speech: [headline, follow.join(', and ')]
+      .filter(Boolean)
+      .map((s) => capitalise(s.replace(/\.$/, '')))
+      .join('. ') + '.',
     lines: tasks.slice(0, 8).map((t) =>
       `${t.status} · ${t.progress ?? 0}% · ${t.title}`),
     source: 'local',
@@ -291,9 +286,14 @@ async function answerStatus(): Promise<Answer> {
 }
 
 async function answerSpend(): Promise<Answer> {
-  const [costs, tokens] = await Promise.all([
+  const [costs, tokens, settings] = await Promise.all([
     api.getMetric('costs').catch(() => null),
     api.getMetric('tokens').catch(() => null),
+    // Budgets, so the answer can say whether the number is a problem. Asked
+    // "how much have I spent", the useful reply is not the figure alone — the
+    // old version reported 297 dollars without mentioning it was six times the
+    // limit, which is the entire point of having a limit.
+    api.getSettings().catch(() => null),
   ])
 
   if (!costs) {
@@ -307,10 +307,27 @@ async function answerSpend(): Promise<Answer> {
 
   const today = Number(costs.today ?? 0)
   const weekly = Number(costs.weekly ?? 0)
+  const limit = Number(settings?.weeklyBudget ?? 0)
+
+  // The verdict, not just the figure — and only when there is a budget to
+  // judge against. Silence here is honest: with no limit set, "that is fine"
+  // would be an opinion the data does not support.
+  const ratio = limit > 0 ? weekly / limit : 0
+  const verdict = ratio >= 1
+    ? `, which is ${overBy(weekly, limit)} your ${moneyAdjective(limit)} budget`
+    : ratio >= 0.9
+      ? `, close to your ${moneyAdjective(limit)} budget`
+      : limit > 0
+        ? `, comfortably inside your ${moneyAdjective(limit)} budget`
+        : ''
 
   return {
     intent: 'spend',
-    speech: `You've spent ${spokenMoney(today)} today, and ${spokenMoney(weekly)} so far this week.`,
+    speech: `${capitalise(vary('spend.lead', [
+      `${approxMoney(today)} today`,
+      `You're at ${approxMoney(today)} today`,
+      `${approxMoney(today)} so far today`,
+    ]))}, and ${approxMoney(weekly)} for the week${verdict}.`,
     lines: [
       `today   $${today.toFixed(2)}`,
       `week    $${weekly.toFixed(2)}`,
@@ -349,8 +366,12 @@ async function answerBroken(): Promise<Answer> {
     }
   }
 
+  // phraseItem rather than the bare title, so this says WHAT is wrong. The
+  // title alone gave "one thing looks wrong — the git collector fix", which
+  // names the thing and withholds the only part worth hearing.
   const speech = items.length
-    ? `${plural(items.length, 'thing')} ${items.length === 1 ? 'looks' : 'look'} wrong — ${items[0].title}.`
+    ? `${capitalise(plural(items.length, 'thing'))} ${items.length === 1 ? 'looks' : 'look'} wrong. `
+      + `${capitalise(phraseItem(items[0]))}.`
     : "Git isn't available, so I can't read repository activity."
 
   return { intent: 'broken', speech: capitalise(speech), lines, source: 'local' }

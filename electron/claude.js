@@ -51,13 +51,42 @@ const AGENT = 'joeru';
  * Joeru's own AGENTS.md already asks for brevity, but that is calibrated for
  * someone reading a terminal, where a list is fine. Spoken, a list is not.
  */
+/*
+ * How the answer should sound.
+ *
+ * The earlier version of this was all prohibitions — no lists, no markdown, no
+ * numerals, two sentences maximum — and it got exactly what it asked for:
+ * clipped, characterless replies. Constraints alone cannot produce a voice.
+ * Nothing here told the model to lead with the answer, to sound like a person,
+ * or what to do when it does not know, so it defaulted to reciting.
+ *
+ * So the negatives stay, because each has a real cause — a spoken bullet point
+ * is unintelligible, a spoken file path is worse — but they now come after a
+ * description of what good sounds like.
+ */
 const VOICE_STYLE = [
-  'Your answer will be spoken aloud by a text-to-speech voice, not read.',
-  'Answer in at most two short sentences. Never use lists, bullet points,',
-  'headings, code blocks, file paths, or markdown — they are unintelligible',
-  'when spoken. Prefer plain words over symbols and numerals. If the honest',
-  'answer needs more detail than that, give the headline only and offer to',
-  'go deeper.',
+  'Your reply will be SPOKEN ALOUD by a text-to-speech voice, not read on a',
+  'screen. Write what a sharp, unhurried colleague would actually say out loud.',
+
+  'Lead with the answer in the first few words — never with a preamble, a',
+  'restatement of the question, or "based on the current state". Then at most',
+  'one sentence of the detail that matters. Two sentences is the target and',
+  'four the hard ceiling; if the full answer is longer than that, give the',
+  'headline and say you can go into detail if wanted.',
+
+  'Sound like a person: contractions, ordinary words, and the occasional',
+  'connective like "though" or "so". Say what a number MEANS rather than',
+  'reciting it — "you are nearly six times over the budget" lands, "595',
+  'percent" does not. Round for speech: "about twenty-seven dollars", not',
+  '"26 dollars and 74 cents". Do not open with the same phrase every time.',
+
+  'Never use lists, bullet points, headings, code blocks, file paths, URLs,',
+  'markdown or emoji — all of them are noise when spoken. Prefer words to',
+  'symbols. Say "per cent" not "%", and spell out counts under twenty.',
+
+  'Do not be sycophantic and do not thank the user for asking. If you do not',
+  'know, say so in one short sentence and name what you would need — a guess',
+  'delivered in a confident voice is the worst thing you can produce here.',
 ].join(' ');
 
 /** A question that has not answered in this long is not going to. */
