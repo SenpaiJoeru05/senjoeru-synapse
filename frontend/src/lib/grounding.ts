@@ -16,11 +16,27 @@ import { isOn as presentationOn } from './presentation'
 
 /** Compact enough to prepend to every question without meaningful cost. */
 export async function currentState(): Promise<string> {
-  const [tasks, attention, costs, git] = await Promise.all([
+  const [tasks, attention, costs, git, memory] = await Promise.all([
     api.getMetric('tasks').catch(() => null),
     api.getAttention().catch(() => null),
     api.getMetric('costs').catch(() => null),
     api.getMetric('git').catch(() => null),
+    /*
+     * The memory index, because its absence was the whole problem.
+     *
+     * Asked "how do I work?", the Chat tab read MEMORY.md and answered from
+     * it; Assistant Mode did not — and that was not the model. The state
+     * block held tasks, attention, spend and git and no memory at all, while
+     * the prompt below told it not to go looking for files. So it had neither
+     * the facts nor permission to fetch them, and answered from general
+     * knowledge instead.
+     *
+     * The index is cheap: 16 memories, about 2KB of names and hooks. Bodies
+     * are deliberately left out — Joeru's own instruction is to read the
+     * index first and open a file only when its line looks relevant, and that
+     * is exactly what the prompt now permits.
+     */
+    api.joeruMemory().catch(() => null),
   ])
 
   const lines: string[] = []
@@ -69,6 +85,27 @@ export async function currentState(): Promise<string> {
       + `$${Number(costs.monthly ?? 0).toFixed(2)} this month`)
   } else {
     lines.push('Spend: UNAVAILABLE')
+  }
+
+  /*
+   * Names and hooks only, with the path to each.
+   *
+   * The path matters: it is what makes "read the one that looks relevant"
+   * actionable rather than a suggestion the model cannot act on.
+   */
+  const memories: any[] = memory?.memories ?? []
+  if (memories.length) {
+    lines.push(`Memory index (${memories.length} memories, in ${memory.dir}):`)
+    for (const m of memories) {
+      lines.push(`  - ${m.folder}/${m.slug}.md — ${m.name}${m.description ? `: ${m.description}` : ''}`)
+    }
+  } else if (memory && memory.available === false) {
+    // Said explicitly, because "no memory" and "the kit is not checked out
+    // here" lead to different answers and only one of them is the model's
+    // fault.
+    lines.push('Memory: UNAVAILABLE (joeru-kit not found at the configured path)')
+  } else {
+    lines.push('Memory: UNAVAILABLE')
   }
 
   if (git?.available === false) {
@@ -137,9 +174,31 @@ export function ground(question: string, state: string, recent: Exchange[] = [])
   return [
     'You are answering one turn of a spoken conversation.',
     '',
-    'Answer using ONLY the CURRENT STATE below. It is read live from the',
-    'dashboard and is authoritative — prefer it over anything you remember or',
-    'infer, and do not go looking for files to confirm it.',
+    'The CURRENT STATE below is read live from the dashboard and is',
+    'authoritative for tasks, attention, spend and git — prefer it over',
+    'anything you remember or infer, and do not go hunting through the',
+    'repository to re-confirm those numbers.',
+    '',
+    /*
+     * The one exception, and it exists because the blanket ban was wrong.
+     *
+     * The instruction used to be "answer using ONLY the current state, do not
+     * go looking for files". Combined with a state block that contained no
+     * memory, that guaranteed the failure: asked about preferences or past
+     * decisions it had neither the facts nor permission to fetch them, so it
+     * answered from general knowledge — while the Chat tab, under no such
+     * ban, read MEMORY.md and got it right.
+     *
+     * Reading one named memory file is a single tool call against a file
+     * whose path is listed above. That is a very different act from searching
+     * a repository, which is what the ban was actually for.
+     */
+    'ONE EXCEPTION: the memory index above lists names, hooks and paths, not',
+    'the memories themselves. If a question is about how Joel works, what was',
+    'decided before, or anything a listed memory plainly covers, READ that',
+    'file before answering — its path is given. Answer from what it says, not',
+    'from what the hook implies. If no memory covers it, say so rather than',
+    'guessing at a preference.',
     '',
     'Answer the question that was actually asked, and nothing else. Do not',
     'volunteer other things from the state because they look urgent — if the',
