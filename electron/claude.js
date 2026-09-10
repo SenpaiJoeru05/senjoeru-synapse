@@ -199,7 +199,84 @@ let current = null;
  * said, and quoting arbitrary speech through cmd.exe is a bug waiting to
  * happen (an apostrophe or a double quote would truncate or corrupt it).
  */
-function ask(question) {
+/**
+ * Flags that make the CLI emit a readable event stream.
+ *
+ * Shared so ask() and chat() cannot drift: the moment one of them streamed
+ * tool calls and the other did not, Assistant Mode had no idea what was being
+ * read while Chat showed every file by name.
+ */
+const STREAM_FLAGS = [
+  '--output-format', 'stream-json', '--verbose',
+  // Token deltas. Note this does NOT replace the complete `assistant` events —
+  // both arrive, which is why text is read only from deltas below.
+  '--include-partial-messages',
+];
+
+/**
+ * A reader for the CLI's newline-delimited JSON stream.
+ *
+ * Buffers the tail on purpose. A chunk boundary can fall mid-object, so
+ * parsing each chunk on its own drops events at random under load — which
+ * shows up as a tool call that sometimes appears and sometimes does not.
+ */
+function makeStreamReader(onEvent = () => {}) {
+  let buffer = '';
+  const state = { text: '', tools: [], costUsd: null, turns: null };
+
+  function handle(event) {
+    if (event?.type === 'stream_event' && event.event?.type === 'content_block_delta') {
+      const delta = event.event.delta;
+      if (delta?.type === 'text_delta' && delta.text) {
+        state.text += delta.text;
+        onEvent({ type: 'text', text: delta.text });
+      } else if (delta?.type === 'thinking_delta' && delta.thinking) {
+        onEvent({ type: 'reasoning', text: delta.thinking });
+      }
+      return;
+    }
+
+    const blocks = event?.message?.content;
+    if (Array.isArray(blocks)) {
+      for (const b of blocks) {
+        // tool_use only. Text here is the settled version of what the deltas
+        // already delivered, and taking both duplicates the whole reply.
+        if (b.type === 'tool_use') {
+          const entry = { name: b.name, input: b.input, at: Date.now() };
+          state.tools.push(entry);
+          onEvent({ type: 'tool', ...entry });
+        }
+      }
+      return;
+    }
+
+    if (event?.type === 'result') {
+      // The result event carries the settled answer; prefer it over the
+      // accumulated deltas, which can include intermediate text.
+      if (typeof event.result === 'string' && event.result.trim()) state.text = event.result;
+      state.costUsd = event.total_cost_usd ?? null;
+      state.turns = event.num_turns ?? null;
+      onEvent({ type: 'done', costUsd: state.costUsd, turns: state.turns });
+    }
+  }
+
+  return {
+    feed(chunk) {
+      buffer += chunk.toString();
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try { handle(JSON.parse(line)); } catch { /* not a complete object */ }
+      }
+    },
+    result() {
+      return { text: state.text.trim(), tools: state.tools, costUsd: state.costUsd };
+    },
+  };
+}
+
+function ask(question, onEvent) {
   cancel();
 
   const q = String(question || '').trim();
@@ -221,6 +298,15 @@ function ask(question) {
       '--append-system-prompt', VOICE_STYLE,
       '--allowedTools', ...ALLOWED_TOOLS,
       ...(dirs.length ? ['--add-dir', ...dirs] : []),
+      /*
+       * Streamed, so the voice window can show what is being read.
+       *
+       * This used to be plain text, which meant Assistant Mode had no idea
+       * what was happening during a thirteen-second wait while Chat showed
+       * every file by name. The answer is still returned as one string —
+       * callers are unchanged — the events are additional.
+       */
+      ...STREAM_FLAGS,
     ], {
       windowsHide: true,
       // Run from the dashboard repo so any project-level context it picks up is
@@ -229,14 +315,14 @@ function ask(question) {
     });
     current = proc;
 
-    let out = '';
+    const reader = makeStreamReader(onEvent);
     let err = '';
     const timer = setTimeout(() => {
       try { proc.kill(); } catch { /* already gone */ }
       reject(new Error(`Claude did not answer within ${TIMEOUT_MS / 1000}s`));
     }, TIMEOUT_MS);
 
-    proc.stdout.on('data', (d) => { out += d.toString(); });
+    proc.stdout.on('data', (d) => reader.feed(d));
     proc.stderr.on('data', (d) => { err += d.toString(); });
 
     proc.on('error', (e) => {
@@ -250,11 +336,12 @@ function ask(question) {
       current = null;
       if (signal) { resolve(''); return; }   // cancelled
 
-      const text = out.trim();
+      const { text } = reader.result();
       if (code !== 0) {
-        // The CLI reports quota and auth problems on stderr; pass the real
-        // message through rather than a generic failure.
-        const detail = (err.trim() || text).split('\n').filter(Boolean).slice(-3).join(' ');
+        // Colour codes stripped first: they make the message unreadable and
+        // stop the caller's failure patterns matching the words in it.
+        const detail = stripAnsi(err.trim() || text)
+          .split('\n').filter(Boolean).slice(-3).join(' ');
         reject(new Error(detail || `Claude Code exited ${code}`));
         return;
       }
@@ -406,21 +493,7 @@ function chat({ sessionId, agent, text }, onEvent = () => {}) {
       ...(resuming ? ['--resume', sessionId] : ['--session-id', sessionId]),
       '--agent', agent || AGENT,
       // No --model: the agent's declared tier decides. See the note above.
-      '--output-format', 'stream-json', '--verbose',
-      /*
-       * Token-level deltas, so the reply types out instead of appearing whole.
-       *
-       * Without this the tool calls streamed and the answer did not: you
-       * watched it read three files and then the entire reply arrived at once,
-       * which reads as a hang followed by a dump.
-       *
-       * The catch, and it is not obvious: turning this on does NOT replace the
-       * complete `assistant` events — both arrive. Accumulating text from the
-       * deltas and from the finished blocks doubles every reply, so the parser
-       * below takes text ONLY from deltas and reads the `assistant` events
-       * purely for tool_use.
-       */
-      '--include-partial-messages',
+      ...STREAM_FLAGS,
       '--allowedTools', ...ALLOWED_TOOLS,
       ...(dirs.length ? ['--add-dir', ...dirs] : []),
     ], { windowsHide: true, cwd: path.join(__dirname, '..') });
@@ -429,68 +502,15 @@ function chat({ sessionId, agent, text }, onEvent = () => {}) {
     current = proc;
     inFlight.set(sessionId, proc);
 
-    const tools = [];
-    let answer = '';
+    const reader = makeStreamReader(onEvent);
     let err = '';
-    let buffer = '';
 
     const timer = setTimeout(() => {
       try { proc.kill(); } catch { /* gone */ }
       reject(new Error(`Claude did not finish within ${CHAT_TIMEOUT_MS / 60_000} minutes`));
     }, CHAT_TIMEOUT_MS);
 
-    /*
-     * stream-json is newline-delimited, and a chunk boundary can fall anywhere
-     * — including mid-object. Parsing per chunk drops events at random under
-     * load, so hold the tail until a newline completes it.
-     */
-    proc.stdout.on('data', (d) => {
-      buffer += d.toString();
-      const lines = buffer.split('\n');
-      buffer = lines.pop() ?? '';
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        let event;
-        try { event = JSON.parse(line); } catch { continue; }
-
-        /*
-         * Token deltas: the only place text is read from.
-         *
-         * thinking_delta is carried through as well. Reasoning previously only
-         * appeared on the OpenCode path — the CLI produces it too, and it was
-         * being discarded.
-         */
-        if (event?.type === 'stream_event' && event.event?.type === 'content_block_delta') {
-          const delta = event.event.delta;
-          if (delta?.type === 'text_delta' && delta.text) {
-            answer += delta.text;
-            onEvent({ type: 'text', text: delta.text });
-          } else if (delta?.type === 'thinking_delta' && delta.thinking) {
-            onEvent({ type: 'reasoning', text: delta.thinking });
-          }
-          continue;
-        }
-
-        const blocks = event?.message?.content;
-        if (Array.isArray(blocks)) {
-          for (const b of blocks) {
-            // tool_use only. Text here is the finished version of what the
-            // deltas already delivered, and taking both would duplicate it.
-            if (b.type === 'tool_use') {
-              const entry = { name: b.name, input: b.input, at: Date.now() };
-              tools.push(entry);
-              onEvent({ type: 'tool', ...entry });
-            }
-          }
-        } else if (event?.type === 'result') {
-          // The result event carries the settled answer; prefer it over the
-          // accumulated deltas, which can include intermediate text.
-          if (typeof event.result === 'string' && event.result.trim()) answer = event.result;
-          onEvent({ type: 'done', costUsd: event.total_cost_usd, turns: event.num_turns });
-        }
-      }
-    });
-
+    proc.stdout.on('data', (d) => reader.feed(d));
     proc.stderr.on('data', (d) => { err += d.toString(); });
 
     proc.on('error', (e) => {
@@ -503,7 +523,11 @@ function chat({ sessionId, agent, text }, onEvent = () => {}) {
       clearTimeout(timer);
       current = null;
       inFlight.delete(sessionId);
-      if (signal) { resolve({ text: answer.trim(), tools, cancelled: true }); return; }
+      if (signal) {
+        const partial = reader.result();
+        resolve({ text: partial.text, tools: partial.tools, cancelled: true });
+        return;
+      }
       if (code !== 0) {
         // Colour codes stripped before the message goes anywhere: they made
         // the text unreadable in the UI and stopped the failure patterns from
@@ -512,7 +536,7 @@ function chat({ sessionId, agent, text }, onEvent = () => {}) {
         reject(new Error(detail || `Claude Code exited ${code}`));
         return;
       }
-      resolve({ text: answer.trim(), tools });
+      resolve(reader.result());
     });
 
     proc.stdin.on('error', () => {});

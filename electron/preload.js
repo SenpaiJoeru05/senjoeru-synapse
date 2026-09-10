@@ -34,6 +34,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // using the existing login rather than an API key.
   claudeAsk: (question) => ipcRenderer.invoke('claude-ask', question),
   claudeCancel: () => ipcRenderer.invoke('claude-cancel'),
+  /**
+   * Tool activity for the answer in flight. Returns an unsubscribe function —
+   * without one, every mount adds another listener and one Read is reported
+   * as many times as the window has been opened.
+   */
+  onClaudeAskEvent: (cb) => {
+    const handler = (_e, payload) => cb(payload);
+    ipcRenderer.on('claude-ask-event', handler);
+    return () => ipcRenderer.removeListener('claude-ask-event', handler);
+  },
 
   // The Chat tab on the same CLI, but with a persistent session and the
   // agent's own model tier rather than a pinned fast one.

@@ -65,6 +65,21 @@ export interface ElectronAPI {
   /** One-shot question through the Claude Code CLI. Resolves with the answer. */
   claudeAsk?: (question: string) => Promise<string>
   claudeCancel?: () => Promise<boolean>
+  /**
+   * Tool activity for the answer in flight. Returns an unsubscribe function.
+   *
+   * Same event shape as the Chat channel because both come from one reader in
+   * the main process — the two used to have separate parsers and only Chat
+   * showed tool calls.
+   */
+  onClaudeAskEvent?: (cb: (e: {
+    type: 'tool' | 'text' | 'reasoning' | 'done'
+    name?: string
+    input?: unknown
+    text?: string
+    costUsd?: number
+    turns?: number
+  }) => void) => () => void
 
   /**
    * A Chat-tab turn on the same CLI, in a persistent session.

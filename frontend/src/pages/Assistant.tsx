@@ -12,7 +12,9 @@
  * to Joeru, which is slower and spends tokens — and the UI says which happened.
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Bot, Send, Volume2, VolumeX, X, Loader2, Zap, Cloud, Mic, Sparkles } from 'lucide-react'
+import {
+  Bot, Send, Volume2, VolumeX, X, Loader2, Zap, Cloud, Mic, Sparkles, Terminal,
+} from 'lucide-react'
 import { answerLocally, classify, type Answer } from '../lib/assistant-intents'
 import { api } from '../lib/api'
 import VoiceOrb from '../components/VoiceOrb'
@@ -83,6 +85,23 @@ const AGENT = 'joeru'
 const MODEL: { providerID: string; modelID: string } | undefined = {
   providerID: 'opencode',
   modelID: 'muse-spark-1.3-contributor-free',
+}
+
+/**
+ * The one argument worth showing for a tool call.
+ *
+ * Both spellings, because the CLI sends file_path where OpenCode sent
+ * filePath — and the filename is the whole point of showing a Read at all.
+ * Basename only: this window is 440px wide and a full Windows path fills it.
+ */
+function toolDetail(input: unknown): string {
+  if (!input || typeof input !== 'object') return ''
+  const o = input as Record<string, unknown>
+  const raw = o.file_path ?? o.filePath ?? o.path ?? o.pattern ?? o.query ?? ''
+  // Both separators in the class. The CLI reports Windows paths with
+  // backslashes, so a forward-slash-only pattern shortens nothing and the
+  // full "D:\Personal Works\..." fills the window.
+  return String(raw).replace(/^.*[\\/]([^\\/]+)$/, '$1').slice(0, 40)
 }
 
 /**
@@ -182,6 +201,8 @@ export default function Assistant() {
   const [phase, setPhase] = useState<Phase>('idle')
   const [muted, setMuted] = useState(false)
   const [status, setStatus] = useState<string | null>(null)
+  /** Tools touched during the answer in flight, in order. */
+  const [activity, setActivity] = useState<{ tool: string; detail: string }[]>([])
   const [analyser, setAnalyser] = useState<AnalyserNode | null>(null)
   const [voiceReady, setVoiceReady] = useState(false)
   const [voices, setVoices] = useState<{ id: string; label: string; current: boolean }[]>([])
@@ -381,6 +402,9 @@ export default function Assistant() {
     setInput('')
     setStatus(null)
     setPhase('thinking')
+    // A fresh question starts a fresh trace; leaving the last one visible
+    // would attribute the previous answer's work to this one.
+    setActivity([])
     setTurns((t) => [...t, { question: q, answer: null, pending: true }])
 
     // Recorded for every turn so the slow ones can be found later and made
@@ -534,9 +558,47 @@ export default function Assistant() {
           // board and asks the user to supply the answer — observed, not
           // hypothetical. See lib/grounding.ts.
           const state = await currentState()
-          const answer = (await window.electronAPI.claudeAsk(
-            ground(q, state, recentRef.current),
-          )).trim()
+
+          /*
+           * Watch what it touches while it works.
+           *
+           * The wait here is 6-13 seconds and the window said nothing about
+           * why. The acknowledgement covers the start of it; this covers the
+           * middle, and it does something the spoken line cannot — it shows
+           * whether anything is actually happening. An empty tool list on a
+           * question that should have read the board is the visible version of
+           * the failure that once had this window claiming it had routed work
+           * to a specialist when it had done nothing at all.
+           *
+           * Unsubscribed in `finally`, or every question would add a listener
+           * and one Read would be reported once per question ever asked.
+           */
+          /*
+           * Collected locally AND put in state.
+           *
+           * State drives the live view; the local array is what the finished
+           * answer is built from. Reading `activity` after the await would
+           * give the value captured when this closure was created — empty —
+           * because a state update does not change the variable already
+           * closed over. That is the bug where the trace shows while waiting
+           * and then vanishes the moment the answer lands.
+           */
+          const trace: { tool: string; detail: string }[] = []
+          const off = window.electronAPI.onClaudeAskEvent?.((e) => {
+            if (e.type !== 'tool') return
+            const entry = { tool: e.name ?? 'tool', detail: toolDetail(e.input) }
+            trace.push(entry)
+            setActivity((prev) => [...prev, entry])
+          })
+
+          let answer: string
+          try {
+            answer = (await window.electronAPI.claudeAsk(
+              ground(q, state, recentRef.current),
+            )).trim()
+          } finally {
+            off?.()
+          }
           if (answer) {
             // Let the acknowledgement finish its last word. Cutting speech
             // mid-syllable to start the answer sounds like a fault, and by now
@@ -546,7 +608,17 @@ export default function Assistant() {
             remember(q, answer)
             setTurns((t) => [...t.slice(0, -1), {
               question: q,
-              answer: { intent: 'ask', speech: answer, lines: [], source: 'claude' },
+              answer: {
+                intent: 'ask',
+                speech: answer,
+                // The receipt, kept past the wait. An empty list on a question
+                // that should have read something is the visible version of a
+                // claim with nothing behind it — which is exactly how this
+                // window once reported routing work to a specialist and doing
+                // nothing at all.
+                lines: trace.map((a) => `${a.tool}${a.detail ? ` · ${a.detail}` : ''}`),
+                source: 'claude',
+              },
             }])
             await speakAnswer(answer)
             return
@@ -840,11 +912,37 @@ export default function Assistant() {
             <div className="text-sm text-gray-400">{t.question}</div>
 
             {t.pending ? (
-              <div className="flex items-center gap-2 text-sm text-gray-500">
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                {classify(t.question) === 'ask'
-                  ? <><span>Asking Joeru…</span><Elapsed /></>
-                  : 'Checking…'}
+              <div className="space-y-1.5">
+                <div className="flex items-center gap-2 text-sm text-gray-500">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  {classify(t.question) === 'ask'
+                    ? <><span>Asking Joeru…</span><Elapsed /></>
+                    : 'Checking…'}
+                </div>
+
+                {/*
+                  What it is touching, as it happens.
+
+                  The newest three only: this window is short, and the useful
+                  question during a wait is "what is it doing now", not "what
+                  has it done". The full list lands on the answer below.
+                */}
+                {activity.length > 0 && (
+                  <div className="pl-5 space-y-0.5">
+                    {activity.slice(-3).map((a, k) => (
+                      <div key={k} className="flex items-baseline gap-1.5 text-[11px]">
+                        <Terminal className="w-2.5 h-2.5 text-cyan-400/70 shrink-0 translate-y-px" />
+                        <span className="font-mono text-cyan-300/80">{a.tool}</span>
+                        {a.detail && <span className="text-gray-600 truncate">{a.detail}</span>}
+                      </div>
+                    ))}
+                    {activity.length > 3 && (
+                      <div className="text-[10px] text-gray-700 pl-4">
+                        +{activity.length - 3} earlier
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             ) : t.answer ? (
               <div className="glass rounded-2xl p-3 space-y-2">

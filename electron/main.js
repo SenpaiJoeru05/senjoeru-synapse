@@ -283,9 +283,20 @@ ipcMain.handle('voice-info', async () => ({
 
 // Assistant Mode's answering brain. One question per invocation, triggered by
 // the user — the same thing as typing `claude -p` in a terminal.
-ipcMain.handle('claude-ask', async (_e, question) => claude.ask(question));
-
-ipcMain.handle('claude-cancel', async () => { claude.cancel(); return true; });
+ipcMain.handle('claude-ask', async (event, question) => {
+  /*
+   * Tool activity is pushed while the answer is being worked out.
+   *
+   * Assistant Mode had no idea what was happening during a thirteen-second
+   * wait while Chat named every file it touched. An invoke resolves exactly
+   * once, so progress has to arrive on its own channel.
+   */
+  const send = (payload) => {
+    // The window can close mid-answer; a destroyed webContents throws.
+    if (!event.sender.isDestroyed()) event.sender.send('claude-ask-event', payload);
+  };
+  return claude.ask(question, send);
+});
 
 // What gets asked, and which brain answered. A question that keeps falling
 // through to the ~13s fallback is a candidate for being made instant, and this
