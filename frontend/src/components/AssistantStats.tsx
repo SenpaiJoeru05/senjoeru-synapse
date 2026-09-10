@@ -17,7 +17,9 @@
  * providers (see App.tsx), so the realtime context does not exist here.
  */
 import { useEffect, useState } from 'react'
-import { AlertTriangle, Coins, GitBranch, Loader2, Play, Clock } from 'lucide-react'
+import {
+  AlertTriangle, Coins, GitBranch, Loader2, Play, Clock as ClockIcon, Sun, Moon,
+} from 'lucide-react'
 import { api } from '@/lib/api'
 import { money, count, usePresentationMode } from '@/lib/presentation'
 import { formatBytes } from '@/lib/utils'
@@ -147,6 +149,66 @@ function Gauge({ value, label, size = 46 }: {
   )
 }
 
+/**
+ * The clock.
+ *
+ * Built here because it was claimed to exist and did not: Assistant Mode said
+ * it had routed the work to a specialist and later that the widget was done,
+ * and neither had happened — no task, no component, no commit. This is the
+ * real one.
+ *
+ * Ticks on its own interval rather than off the metrics poll: a clock that
+ * updates every fifteen seconds is a clock that is wrong most of the time.
+ *
+ * Day and night come from the local hour and nothing else. Actual sunrise and
+ * sunset need a latitude, which this app does not have and which would mean an
+ * external service — so the label says "day"/"night" on a fixed boundary and
+ * does not pretend to know when the sun is up where you are.
+ */
+function Clock() {
+  const [now, setNow] = useState(() => new Date())
+  useEffect(() => {
+    // Aligned to the next whole second, so the seconds digit does not appear
+    // to skip or stall by drifting against the wall clock.
+    let timer: number
+    const tick = () => {
+      setNow(new Date())
+      timer = window.setTimeout(tick, 1000 - (Date.now() % 1000))
+    }
+    timer = window.setTimeout(tick, 1000 - (Date.now() % 1000))
+    return () => window.clearTimeout(timer)
+  }, [])
+
+  const hour = now.getHours()
+  const daytime = hour >= 6 && hour < 18
+  const hh = String(hour).padStart(2, '0')
+  const mm = String(now.getMinutes()).padStart(2, '0')
+  const ss = String(now.getSeconds()).padStart(2, '0')
+
+  return (
+    <div className="glass rounded-xl px-2.5 py-2">
+      <div className="flex items-center justify-between text-[9px] uppercase tracking-wider text-gray-500">
+        <span>Local</span>
+        <span className="flex items-center gap-1">
+          {daytime
+            ? <Sun className="w-3 h-3 text-amber-300/80" />
+            : <Moon className="w-3 h-3 text-sky-300/80" />}
+          {daytime ? 'day' : 'night'}
+        </span>
+      </div>
+      <div className="mt-0.5 font-mono tabular-nums text-cyan-200 leading-none">
+        <span className="text-xl">{hh}:{mm}</span>
+        {/* Seconds smaller and dimmer: they carry no decision, and at full
+            weight the whole tile flickers in peripheral vision. */}
+        <span className="text-xs text-cyan-200/50">:{ss}</span>
+      </div>
+      <div className="mt-1 text-[9px] text-gray-600 font-mono">
+        {now.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })}
+      </div>
+    </div>
+  )
+}
+
 /** Seconds to something a person reads at a glance. */
 function uptimeLabel(seconds: number): string {
   const s = Math.max(0, Math.floor(seconds))
@@ -253,6 +315,8 @@ export default function AssistantStats() {
 
   return (
     <aside className="w-[190px] shrink-0 overflow-y-auto p-3 space-y-2 border-l border-white/5">
+      <Clock />
+
       <div className="text-[9px] uppercase tracking-[0.15em] text-gray-600 px-0.5">
         Workspace
       </div>
@@ -264,7 +328,7 @@ export default function AssistantStats() {
           tone={snap.attention ? 'warn' : 'good'}
         />
         <Tile icon={Play} label="In progress" value={String(snap.working)} />
-        <Tile icon={Clock} label="Waiting" value={String(snap.waiting)} />
+        <Tile icon={ClockIcon} label="Waiting" value={String(snap.waiting)} />
         <Tile
           icon={GitBranch} label="Modified"
           value={String(snap.dirty)}
