@@ -38,6 +38,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // The Chat tab on the same CLI, but with a persistent session and the
   // agent's own model tier rather than a pinned fast one.
   claudeChat: (args) => ipcRenderer.invoke('claude-chat', args),
+  claudeSessions: () => ipcRenderer.invoke('claude-sessions'),
+  claudeSessionRead: (id) => ipcRenderer.invoke('claude-session-read', id),
   claudeChatCancel: (sessionId) => ipcRenderer.invoke('claude-chat-cancel', sessionId),
   claudeChatForget: (sessionId) => ipcRenderer.invoke('claude-chat-forget', sessionId),
   /**

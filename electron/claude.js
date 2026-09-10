@@ -348,6 +348,20 @@ function chat({ sessionId, agent, text }, onEvent = () => {}) {
       '--agent', agent || AGENT,
       // No --model: the agent's declared tier decides. See the note above.
       '--output-format', 'stream-json', '--verbose',
+      /*
+       * Token-level deltas, so the reply types out instead of appearing whole.
+       *
+       * Without this the tool calls streamed and the answer did not: you
+       * watched it read three files and then the entire reply arrived at once,
+       * which reads as a hang followed by a dump.
+       *
+       * The catch, and it is not obvious: turning this on does NOT replace the
+       * complete `assistant` events — both arrive. Accumulating text from the
+       * deltas and from the finished blocks doubles every reply, so the parser
+       * below takes text ONLY from deltas and reads the `assistant` events
+       * purely for tool_use.
+       */
+      '--include-partial-messages',
       '--allowedTools', ...ALLOWED_TOOLS,
       ...(dirs.length ? ['--add-dir', ...dirs] : []),
     ], { windowsHide: true, cwd: path.join(__dirname, '..') });
@@ -380,16 +394,33 @@ function chat({ sessionId, agent, text }, onEvent = () => {}) {
         let event;
         try { event = JSON.parse(line); } catch { continue; }
 
+        /*
+         * Token deltas: the only place text is read from.
+         *
+         * thinking_delta is carried through as well. Reasoning previously only
+         * appeared on the OpenCode path — the CLI produces it too, and it was
+         * being discarded.
+         */
+        if (event?.type === 'stream_event' && event.event?.type === 'content_block_delta') {
+          const delta = event.event.delta;
+          if (delta?.type === 'text_delta' && delta.text) {
+            answer += delta.text;
+            onEvent({ type: 'text', text: delta.text });
+          } else if (delta?.type === 'thinking_delta' && delta.thinking) {
+            onEvent({ type: 'reasoning', text: delta.thinking });
+          }
+          continue;
+        }
+
         const blocks = event?.message?.content;
         if (Array.isArray(blocks)) {
           for (const b of blocks) {
+            // tool_use only. Text here is the finished version of what the
+            // deltas already delivered, and taking both would duplicate it.
             if (b.type === 'tool_use') {
               const entry = { name: b.name, input: b.input, at: Date.now() };
               tools.push(entry);
               onEvent({ type: 'tool', ...entry });
-            } else if (b.type === 'text' && b.text) {
-              answer += b.text;
-              onEvent({ type: 'text', text: b.text });
             }
           }
         } else if (event?.type === 'result') {

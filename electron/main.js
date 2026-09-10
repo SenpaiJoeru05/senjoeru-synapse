@@ -240,6 +240,7 @@ const tts = require('./tts');
 const stt = require('./stt');
 const whisper = require('./whisper');
 const claude = require('./claude');
+const claudeSessions = require('./claude-sessions');
 
 /*
  * Release the voice subprocesses on the way out.
@@ -365,6 +366,24 @@ ipcMain.handle('claude-chat', async (event, { sessionId, agent, text }) => {
     // Rejecting an invoke loses the message shape the renderer needs to fall
     // back cleanly, so failure is data rather than an exception.
     return { text: '', tools: [], error: err.message };
+  }
+});
+
+/**
+ * The CLI's own conversation store, read-only.
+ *
+ * Rooted at the repo rather than a caller-supplied path, so the renderer
+ * cannot ask for another project's transcripts.
+ */
+const PROJECT_DIR = path.join(__dirname, '..');
+
+ipcMain.handle('claude-sessions', async () => claudeSessions.list(PROJECT_DIR));
+
+ipcMain.handle('claude-session-read', async (_e, id) => {
+  try {
+    return claudeSessions.read(PROJECT_DIR, id);
+  } catch (err) {
+    return { turns: [], error: err.message };
   }
 });
 

@@ -86,12 +86,21 @@ export interface ElectronAPI {
    * distinguishable from a real cancellation.
    */
   claudeChatCancel?: (sessionId: string) => Promise<boolean>
+  /** Conversations the CLI has stored for this project, newest first. */
+  claudeSessions?: () => Promise<{
+    id: string; title: string; updated: number; bytes: number
+  }[]>
+  /** Replay one stored conversation. Tool calls are summarised, not replayed. */
+  claudeSessionRead?: (id: string) => Promise<{
+    turns: { role: 'user' | 'assistant'; text: string; tools?: { name: string; input: unknown }[] }[]
+    error?: string
+  }>
   /** Drop a session so the next turn starts fresh rather than resuming. */
   claudeChatForget?: (sessionId: string) => Promise<boolean>
   /** Live tool activity for the turn in flight. Returns an unsubscribe function. */
   onClaudeChatEvent?: (cb: (e: {
     sessionId: string
-    type: 'tool' | 'text' | 'done'
+    type: 'tool' | 'text' | 'reasoning' | 'done'
     name?: string
     input?: unknown
     text?: string

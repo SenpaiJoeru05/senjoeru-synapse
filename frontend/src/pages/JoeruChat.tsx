@@ -209,6 +209,14 @@ export default function JoeruChat() {
    */
   const cliSessionRef = useRef<string | null>(null)
   /** Which runner actually answered the last turn — null until one has. */
+  /**
+   * Which row is selected, for the sidebar only.
+   *
+   * Separate from sessionId, which means specifically 'the OpenCode session'
+   * and is null whenever the CLI is answering — using it for the highlight
+   * left the open conversation unmarked in the list.
+   */
+  const [selected, setSelected] = useState<string | null>(null)
   const [runner, setRunner] = useState<'claude' | 'opencode' | null>(null)
 
   /**
@@ -249,7 +257,33 @@ export default function JoeruChat() {
     api.getTeam().then((r: any) => setTeam(r?.team || [])).catch(() => setTeam([]))
   }, [])
 
+  /**
+   * The conversation list, from whichever store the answers are actually in.
+   *
+   * Chat moved onto the CLI and this did not, so conversations were being
+   * saved and made unreachable — talk to one today, never find it again
+   * tomorrow, which is worse than not saving it because you would assume it
+   * was there. The CLI keeps its own transcripts and they are now the list
+   * when that path is available.
+   *
+   * Both shapes are normalised here rather than at the render site, so the
+   * sidebar does not have to know which store it is looking at.
+   */
   async function refreshSessions() {
+    const cli = window.electronAPI?.claudeSessions
+    if (cli) {
+      try {
+        const rows = await cli()
+        setSessions((rows || []).map((r) => ({
+          id: r.id,
+          title: r.title,
+          time: { updated: r.updated },
+          runner: 'claude' as const,
+        })))
+        return
+      } catch { /* fall through to OpenCode rather than showing nothing */ }
+    }
+
     try {
       const { sessions: all } = await api.joeruSessions()
       // Root sessions only — subagent runs are steps inside a conversation,
@@ -257,7 +291,8 @@ export default function JoeruChat() {
       setSessions(
         (all || [])
           .filter((s: any) => !s.parentID)
-          .sort((a: any, b: any) => (b.time?.updated || 0) - (a.time?.updated || 0)),
+          .sort((a: any, b: any) => (b.time?.updated || 0) - (a.time?.updated || 0))
+          .map((s: any) => ({ ...s, runner: 'opencode' as const })),
       )
     } catch { /* server down — the health panel already says so */ }
   }
@@ -279,16 +314,51 @@ export default function JoeruChat() {
    * and not worth it while these old sessions hold nothing important.
    */
   async function openSession(id: string) {
-    if (id === sessionId || sending) return
+    if (id === selected || sending) return
+    setSelected(id)
     setLoadingHistory(true)
+    setFellBack(null)
+    setTurns([])
+
+    /*
+     * A CLI conversation is RESUMED, not merely displayed.
+     *
+     * This is what makes the list worth having: the id becomes the live
+     * session, so the next thing you send continues where it left off instead
+     * of starting fresh with the old messages sitting uselessly above it.
+     */
+    const row = sessions.find((s: any) => s.id === id)
+    if (row?.runner === 'claude' && window.electronAPI?.claudeSessionRead) {
+      setSessionId(null)
+      cliSessionRef.current = id
+      setRunner('claude')
+      try {
+        const { turns: restored, error } = await window.electronAPI.claudeSessionRead(id)
+        if (error) throw new Error(error)
+        setTurns((restored || []).map((t) => ({
+          role: t.role,
+          text: t.text,
+          tools: (t.tools || []).map((x) => ({
+            tool: x.name, status: 'completed', summary: describeInput(x.input),
+          })),
+        })))
+      } catch (err: any) {
+        setTurns([{
+          role: 'assistant', error: true,
+          text: `Could not read that conversation: ${err.message}`,
+        }])
+      } finally {
+        setLoadingHistory(false)
+      }
+      return
+    }
+
     setSessionId(id)
     if (cliSessionRef.current) {
       window.electronAPI?.claudeChatForget?.(cliSessionRef.current)
       cliSessionRef.current = null
     }
     setRunner(null)
-    setFellBack(null)
-    setTurns([])
     try {
       const { messages } = await api.joeruMessages(id)
       const restored: Turn[] = []
@@ -321,6 +391,7 @@ export default function JoeruChat() {
     }
     setRunner(null)
     setFellBack(null)
+    setSelected(null)
     setTurns([])
     inputRef.current?.focus()
   }
@@ -420,6 +491,7 @@ export default function JoeruChat() {
         const tools: ToolCall[] = []
         let streamed = ''
         let turnCost: number | null = null
+        let thinking = ''
         // Subscribed for the turn only, and unsubscribed in `finally` —
         // leaving it attached would report the same Read once per turn sent.
         const off = api2.onClaudeChatEvent((e) => {
@@ -428,13 +500,20 @@ export default function JoeruChat() {
             tools.push({ tool: e.name ?? 'tool', status: 'running', summary: describeInput(e.input) })
           } else if (e.type === 'text' && e.text) {
             streamed += e.text
+          } else if (e.type === 'reasoning' && e.text) {
+            // The CLI emits thinking deltas and this path was dropping them —
+            // reasoning only ever showed on the OpenCode side.
+            thinking += e.text
           } else if (e.type === 'done') {
             // The CLI prices every turn and Chat was discarding it. Showing it
             // costs nothing, and on a subscription already well past its
             // budget it is the number worth having in front of you.
             turnCost = e.costUsd ?? null
           }
-          setLive({ role: 'assistant', text: streamed, tools: [...tools] })
+          setLive({
+            role: 'assistant', text: streamed, tools: [...tools],
+            reasoning: thinking || undefined,
+          })
         })
 
         let result
@@ -454,6 +533,7 @@ export default function JoeruChat() {
             })),
             seconds: Math.round((Date.now() - started) / 1000),
             costUsd: turnCost ?? undefined,
+            reasoning: thinking || undefined,
           }])
           return
         }
@@ -558,14 +638,14 @@ export default function JoeruChat() {
             {sessions.map(s => (
               <button key={s.id} onClick={() => openSession(s.id)}
                 className={`w-full text-left px-2.5 py-2 rounded-lg transition-colors group ${
-                  s.id === sessionId ? 'bg-white/[0.07]' : 'hover:bg-white/[0.03]'
+                  s.id === selected ? 'bg-white/[0.07]' : 'hover:bg-white/[0.03]'
                 }`}>
                 <div className="flex items-center gap-1.5">
                   <MessageSquare className={`w-3 h-3 shrink-0 ${
-                    s.id === sessionId ? 'text-indigo-300' : 'text-gray-600'
+                    s.id === selected ? 'text-indigo-300' : 'text-gray-600'
                   }`} />
                   <span className={`text-[12px] truncate ${
-                    s.id === sessionId ? 'text-gray-100' : 'text-gray-400 group-hover:text-gray-300'
+                    s.id === selected ? 'text-gray-100' : 'text-gray-400 group-hover:text-gray-300'
                   }`}>
                     {s.title || s.slug || 'Untitled'}
                   </span>
