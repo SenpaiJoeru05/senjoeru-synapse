@@ -16,6 +16,7 @@ import { Bot, Send, Volume2, VolumeX, X, Loader2, Zap, Cloud, Mic, Sparkles } fr
 import { answerLocally, classify, type Answer } from '../lib/assistant-intents'
 import { api } from '../lib/api'
 import VoiceOrb from '../components/VoiceOrb'
+import AssistantStats, { useWideEnough } from '../components/AssistantStats'
 import type { AssistantInsights } from '../electron'
 import { currentState, ground, type Exchange } from '../lib/grounding'
 import { acknowledgement } from '../lib/acknowledge'
@@ -221,6 +222,8 @@ export default function Assistant() {
   >(null)
   const sessionRef = useRef<string | null>(null)
   const busy = phase !== 'idle'
+  // Drives whether the stats rail has room to render.
+  const wide = useWideEnough()
 
   useEffect(() => { mutedRef.current = muted }, [muted])
 
@@ -748,14 +751,34 @@ export default function Assistant() {
     : status ?? (voiceReady ? 'Click to speak' : 'Voice unavailable — you can still type')
 
   return (
-    <div className="h-screen flex flex-col bg-background text-white overflow-hidden">
+    /*
+     * A tinted ground behind the glass, not flat `bg-background`.
+     *
+     * backdrop-filter has nothing to blur against a solid fill, so the glass
+     * utilities render as plain translucent panels on it. The two radial
+     * washes give the blur something to pick up, which is the whole reason
+     * glassmorphism reads as depth rather than as low-contrast boxes.
+     */
+    <div
+      className="h-screen flex bg-background text-white overflow-hidden"
+      style={{
+        backgroundImage:
+          'radial-gradient(120% 80% at 15% -10%, rgba(34,211,238,0.10), transparent 60%),'
+          + 'radial-gradient(100% 70% at 110% 110%, rgba(99,102,241,0.14), transparent 60%)',
+      }}
+    >
+    <div className="flex-1 min-w-0 flex flex-col">
       <div
         className="flex items-center justify-between px-4 py-3 border-b border-white/10 shrink-0"
         style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
       >
         <div className="flex items-center gap-2">
-          <Bot className="w-4 h-4 text-primary" />
-          <span className="text-sm font-semibold">Assistant Mode</span>
+          {/* A lit chip rather than a bare glyph — the one piece of chrome that
+              says this window is listening for you. */}
+          <span className="w-6 h-6 rounded-lg glass flex items-center justify-center">
+            <Bot className="w-3.5 h-3.5 text-cyan-300" />
+          </span>
+          <span className="text-sm font-semibold tracking-tight">Assistant Mode</span>
         </div>
         <div className="flex items-center gap-1" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
           {voices.length > 1 && (
@@ -774,7 +797,7 @@ export default function Assistant() {
                 }
               }}
               title="Voice"
-              className="bg-surface2 border border-white/10 rounded-lg text-[11px] text-gray-400 px-1.5 py-1 focus:outline-none focus:border-primary"
+              className="glass rounded-lg text-[11px] text-gray-400 px-1.5 py-1 focus:outline-none focus:border-cyan-400/40"
             >
               {voices.map((v) => (
                 <option key={v.id} value={v.id}>{v.id}</option>
@@ -800,7 +823,7 @@ export default function Assistant() {
             <div className="space-y-1">
               {EXAMPLES.map((e) => (
                 <button key={e} onClick={() => ask(e)} disabled={busy}
-                  className="block w-full text-left px-3 py-1.5 rounded-lg bg-surface2 hover:bg-white/10 disabled:opacity-50 text-gray-300 text-xs">
+                  className="block w-full text-left px-3 py-1.5 rounded-xl glass hover:border-cyan-400/30 hover:text-white disabled:opacity-50 text-gray-300 text-xs transition-colors">
                   {e}
                 </button>
               ))}
@@ -824,7 +847,7 @@ export default function Assistant() {
                   : 'Checking…'}
               </div>
             ) : t.answer ? (
-              <div className="rounded-xl bg-surface2 p-3 space-y-2">
+              <div className="glass rounded-2xl p-3 space-y-2">
                 <div className="flex items-start gap-2">
                   {t.answer.source === 'local'
                     ? <Zap className="w-3.5 h-3.5 text-emerald-400 mt-0.5 shrink-0" />
@@ -849,7 +872,7 @@ export default function Assistant() {
         ))}
       </div>
 
-      <div className="shrink-0 border-t border-white/10">
+      <div className="shrink-0 border-t border-white/5">
         <div className="flex flex-col items-center pt-4 pb-2">
           <button
             onClick={onOrbClick}
@@ -896,14 +919,23 @@ export default function Assistant() {
             value={input}
             onChange={(e) => setInput(e.target.value)}
             placeholder="…or type instead"
-            className="flex-1 px-3 py-2 rounded-lg bg-surface2 border border-white/10 focus:border-primary focus:outline-none text-sm"
+            className="flex-1 px-3.5 py-2.5 rounded-xl glass placeholder:text-gray-600 focus:border-cyan-400/40 focus:outline-none text-sm"
           />
           <button type="submit" disabled={busy || !input.trim()}
-            className="p-2 rounded-lg bg-primary/20 text-primary hover:bg-primary/30 disabled:opacity-40">
+            className="p-2.5 rounded-xl glass text-cyan-300 hover:border-cyan-400/40 hover:text-cyan-200 disabled:opacity-40 transition-colors">
             <Send className="w-4 h-4" />
           </button>
         </form>
       </div>
+    </div>
+
+    {/*
+      The stats rail, only when there is room for it. At the default 440px a
+      stats column would leave the conversation about 250px, which is worse
+      than showing no stats at all — so widen the window and it appears. The
+      window remembers its size now, so that is a one-time gesture.
+    */}
+    {wide && <AssistantStats />}
     </div>
   )
 }
