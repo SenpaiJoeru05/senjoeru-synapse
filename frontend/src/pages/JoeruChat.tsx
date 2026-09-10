@@ -28,12 +28,20 @@ const SUGGESTIONS = [
   'Who on the team handles database work?',
 ]
 
-/** The most useful identifying argument, whatever kind of tool this is. */
+/**
+ * The most useful identifying argument, whatever kind of tool this is.
+ *
+ * Reads both spellings on purpose: OpenCode sends `filePath`, the Claude Code
+ * CLI sends `file_path`. Now that both runners feed this, checking only one
+ * would leave the summary blank for Read and Edit — the two tools where the
+ * filename is the entire point of showing the call at all.
+ */
 function describeInput(input: any): string {
   if (!input || typeof input !== 'object') return ''
   const raw =
-    input.filePath || input.path || input.pattern || input.command ||
-    input.description || input.query || ''
+    input.filePath || input.file_path || input.path || input.pattern
+    || input.command || input.description || input.query
+    || input.old_string || ''
   return String(raw).replace(/^.*[\\/]([^\\/]+)$/, '$1').slice(0, 80)
 }
 
@@ -154,6 +162,18 @@ export default function JoeruChat() {
   // would break on an upgrade. At 1s against a model that takes 1-60s, the
   // difference is invisible — and tool calls show up as they happen.
   const [live, setLive] = useState<Turn | null>(null)
+  /**
+   * Our own session id for the Claude Code CLI, distinct from the OpenCode
+   * session in `sessionId`.
+   *
+   * A ref, not state: `send` reads it in the same tick it creates it, and a
+   * state update would not have landed yet — the first turn would name a
+   * session and the second would generate a different one, so nothing would
+   * ever resume.
+   */
+  const cliSessionRef = useRef<string | null>(null)
+  /** Which runner answered the last turn, so the UI can say so. */
+  const [runner, setRunner] = useState<'claude' | 'opencode' | null>(null)
 
   // Default to Joeru himself. Sending no agent gets OpenCode's generic `build`
   // agent, which has no persona and no team — the chat would answer as a plain
@@ -184,11 +204,29 @@ export default function JoeruChat() {
 
   useEffect(() => { refreshSessions() }, [health?.running])
 
-  /** Load a past conversation, including ones started in the OpenCode TUI. */
+  /**
+   * Load a past conversation, including ones started in the OpenCode TUI.
+   *
+   * KNOWN LIMITATION, stated rather than hidden: these are OpenCode
+   * transcripts, and the Claude Code CLI has never seen them. Reading one back
+   * and then sending a message starts a FRESH CLI conversation — what is on
+   * screen above your question is history the answering model does not have.
+   *
+   * The CLI session is cleared here deliberately so that at least the
+   * behaviour is predictable: a new conversation, not the previous CLI
+   * conversation wearing someone else's transcript. Bridging the two would
+   * mean replaying an OpenCode history into a CLI session, which is real work
+   * and not worth it while these old sessions hold nothing important.
+   */
   async function openSession(id: string) {
     if (id === sessionId || sending) return
     setLoadingHistory(true)
     setSessionId(id)
+    if (cliSessionRef.current) {
+      window.electronAPI?.claudeChatForget?.(cliSessionRef.current)
+      cliSessionRef.current = null
+    }
+    setRunner(null)
     setTurns([])
     try {
       const { messages } = await api.joeruMessages(id)
@@ -210,6 +248,17 @@ export default function JoeruChat() {
 
   function newChat() {
     setSessionId(null)
+    /*
+     * Drop the CLI session too, or "new chat" would clear the transcript on
+     * screen and then resume the old conversation underneath it — the worst
+     * version of this bug, because the history you cannot see is the history
+     * still being answered from.
+     */
+    if (cliSessionRef.current) {
+      window.electronAPI?.claudeChatForget?.(cliSessionRef.current)
+      cliSessionRef.current = null
+    }
+    setRunner(null)
     setTurns([])
     inputRef.current?.focus()
   }
@@ -270,6 +319,69 @@ export default function JoeruChat() {
 
     const started = Date.now()
     try {
+      /*
+       * The Claude Code CLI first, OpenCode as the fallback.
+       *
+       * Same runner as Assistant Mode, but with two differences that matter
+       * here: the conversation lives in the CLI's own session store, so a
+       * follow-up costs a fraction of the first turn rather than re-sending
+       * the transcript (measured: $0.1402 then $0.0072), and no model is
+       * pinned — the agent's declared tier applies, so joeru answers on opus
+       * and frontend-engineer on sonnet.
+       *
+       * The fallback is not defensive padding. `npm run dev:web` serves this
+       * same page in a browser with no electronAPI at all, and that is the
+       * only path that works there.
+       */
+      const api2 = window.electronAPI
+      if (api2?.claudeChat && api2?.onClaudeChatEvent) {
+        if (!cliSessionRef.current) cliSessionRef.current = crypto.randomUUID()
+        const cliId = cliSessionRef.current
+
+        const tools: ToolCall[] = []
+        let streamed = ''
+        // Subscribed for the turn only, and unsubscribed in `finally` —
+        // leaving it attached would report the same Read once per turn sent.
+        const off = api2.onClaudeChatEvent((e) => {
+          if (e.sessionId !== cliId) return
+          if (e.type === 'tool') {
+            tools.push({ tool: e.name ?? 'tool', status: 'running', summary: describeInput(e.input) })
+          } else if (e.type === 'text' && e.text) {
+            streamed += e.text
+          }
+          setLive({ role: 'assistant', text: streamed, tools: [...tools] })
+        })
+
+        let result
+        try {
+          result = await api2.claudeChat({ sessionId: cliId, agent: agent || undefined, text })
+        } finally {
+          off()
+        }
+
+        if (!result.error) {
+          setRunner('claude')
+          setTurns(t => [...t, {
+            role: 'assistant',
+            text: result.text || '_(no text in reply)_',
+            tools: result.tools.map((x) => ({
+              tool: x.name, status: 'completed', summary: describeInput(x.input),
+            })),
+            seconds: Math.round((Date.now() - started) / 1000),
+          }])
+          return
+        }
+
+        // The CLI failed — quota, auth, a missing agent. Say so in the
+        // transcript rather than silently answering on a different model with
+        // a different persona, then carry on to OpenCode below.
+        setTurns(t => [...t, {
+          role: 'assistant',
+          error: true,
+          text: `Claude Code could not answer (${result.error}). Falling back to OpenCode.`,
+        }])
+      }
+
       let id = sessionId
       if (!id) {
         // Title it after the first thing asked, so the list is scannable.
@@ -279,6 +391,7 @@ export default function JoeruChat() {
 
       const reply = await api.joeruSend(id!, text, agent || undefined)
       const { text: replyText, tools, reasoning } = readParts(reply?.parts)
+      setRunner('opencode')
       setTurns(t => [...t, {
         role: 'assistant',
         text: replyText || '_(no text in reply)_',
@@ -370,6 +483,26 @@ export default function JoeruChat() {
           <span className="text-[11px] text-gray-600">
             {health?.running ? 'connected' : 'connecting…'}
           </span>
+          {/*
+            Which runner answered. Worth showing because the fallback changes
+            more than speed: OpenCode answers on a different model AND, since
+            it cannot write, with different capabilities. An answer that
+            silently came from the backup should not look like one that did not.
+          */}
+          {runner && (
+            <span
+              title={runner === 'claude'
+                ? "Claude Code CLI — the agent's own model tier, persistent session"
+                : 'OpenCode fallback — free tier, read-only tools'}
+              className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
+                runner === 'claude'
+                  ? 'bg-violet-500/15 text-violet-300'
+                  : 'bg-amber-500/15 text-amber-300'
+              }`}
+            >
+              {runner === 'claude' ? 'claude code' : 'opencode fallback'}
+            </span>
+          )}
           {loadingHistory && <Loader2 className="w-3 h-3 animate-spin text-gray-600" />}
         </div>
 
