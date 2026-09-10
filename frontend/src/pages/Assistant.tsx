@@ -18,6 +18,7 @@ import { api } from '../lib/api'
 import VoiceOrb from '../components/VoiceOrb'
 import type { AssistantInsights } from '../electron'
 import { currentState, ground } from '../lib/grounding'
+import { acknowledgement } from '../lib/acknowledge'
 import {
   say, hush, hear, stopHearing, voiceAvailable, disposeVoice, MicLevel,
   usesMainProcessCapture, beginListening, endListening, abortListening,
@@ -182,6 +183,8 @@ export default function Assistant() {
   const micRef = useRef<MicLevel | null>(null)
   /** Set while listening; calling it ends the turn. */
   const stopListeningRef = useRef<(() => void) | null>(null)
+  /** True only while the "on it" line is playing, not the answer. */
+  const ackingRef = useRef(false)
   const sessionRef = useRef<string | null>(null)
   const busy = phase !== 'idle'
 
@@ -228,6 +231,36 @@ export default function Assistant() {
     }
   }, [])
 
+  /**
+   * Say "on it" while the slow work runs, and return when that has finished
+   * speaking — NOT when the work has.
+   *
+   * Separate from speakAnswer because the phase afterwards is different: an
+   * answer ends the turn and goes idle, whereas this hands back to 'thinking'
+   * because the actual work is still running behind it.
+   *
+   * Never rejects. This is a courtesy over the top of the real request, so a
+   * synthesis failure here must not take down the answer the user is waiting
+   * for — it just goes back to being silent.
+   */
+  const speakAck = useCallback(async (question: string) => {
+    if (mutedRef.current || !voiceAvailable()) return
+    const line = acknowledgement(question)
+    setStatus(line)
+    setPhase('speaking')
+    ackingRef.current = true
+    try {
+      await say(line, (a) => setAnalyser(a))
+    } catch {
+      /* the answer still matters; stay quiet and carry on */
+    } finally {
+      ackingRef.current = false
+      setAnalyser(null)
+      // Back to thinking, not idle: the request this covers is still in flight.
+      setPhase('thinking')
+    }
+  }, [])
+
   async function ensureSession(): Promise<string> {
     if (sessionRef.current) return sessionRef.current
     const s = await api.joeruCreateSession('Assistant Mode (voice)')
@@ -252,6 +285,10 @@ export default function Assistant() {
       window.electronAPI?.logQuestion?.({ question: q, route, ms: Date.now() - askedAt, intent })
     }
 
+    // Declared out here so the catch below can wait on it too; scoped inside
+    // the try it would be invisible there.
+    let acked: Promise<void> | null = null
+
     try {
       const local = await answerLocally(q)
       if (local) {
@@ -260,6 +297,20 @@ export default function Assistant() {
         await speakAnswer(local.speech)
         return
       }
+
+      /*
+       * Past here every route takes seconds, so say something now.
+       *
+       * Started but NOT awaited: the acknowledgement synthesises and plays
+       * while the request is already in flight, so it costs nothing. Awaiting
+       * it here would add its own second or so to every slow answer, which is
+       * the opposite of the point.
+       *
+       * It sits below the local branch above deliberately. Those answers
+       * return in milliseconds, and prefixing one with "let me check" would
+       * make the fast path sound slow.
+       */
+      acked = speakAck(q)
 
       // Claude Code first, OpenCode as the backstop.
       //
@@ -276,6 +327,10 @@ export default function Assistant() {
           const state = await currentState()
           const answer = (await window.electronAPI.claudeAsk(ground(q, state))).trim()
           if (answer) {
+            // Let the acknowledgement finish its last word. Cutting speech
+            // mid-syllable to start the answer sounds like a fault, and by now
+            // it has usually long finished anyway.
+            await acked
             log('claude')
             setTurns((t) => [...t.slice(0, -1), {
               question: q,
@@ -300,6 +355,7 @@ export default function Assistant() {
       const text = extractText(reply)
 
       if (failure && !text) {
+        await acked   // as above: never talk over the acknowledgement
         log('failed')
         setTurns((t) => [...t.slice(0, -1), {
           question: q,
@@ -311,6 +367,7 @@ export default function Assistant() {
         return
       }
 
+      await acked   // as above: never talk over the acknowledgement
       log('joeru')
       const said = text || 'Joeru returned nothing.'
       setTurns((t) => [...t.slice(0, -1), {
@@ -319,6 +376,9 @@ export default function Assistant() {
       }])
       await speakAnswer(said)
     } catch (err: any) {
+      // The acknowledgement may still be mid-sentence; letting it land keeps
+      // the orb and the audio in step even on the failure path.
+      await acked
       const msg = `That failed: ${err?.message ?? 'unknown error'}`
       setTurns((t) => [...t.slice(0, -1), {
         question: q,
@@ -326,7 +386,7 @@ export default function Assistant() {
       }])
       setPhase('idle')
     }
-  }, [speakAnswer])
+  }, [speakAnswer, speakAck])
 
   /**
    * What to do with a transcription, shared by both recognisers.
@@ -359,7 +419,20 @@ export default function Assistant() {
 
   /** One click does the right thing for whatever it is currently doing. */
   async function onOrbClick() {
-    if (phase === 'speaking') { await hush(); setAnalyser(null); setPhase('idle'); return }
+    if (phase === 'speaking') {
+      await hush()
+      setAnalyser(null)
+      /*
+       * Silencing the acknowledgement does NOT cancel the work behind it.
+       *
+       * Going idle here would claim the turn was over while the request was
+       * still running, and the answer would then arrive out of nowhere. The
+       * request is not cancellable mid-flight, so the honest state is the one
+       * that is actually true: still thinking.
+       */
+      setPhase(ackingRef.current ? 'thinking' : 'idle')
+      return
+    }
     if (phase === 'listening') {
       // whisper: the turn is a promise waiting on this second click, so
       // resolving it lets the listening path move on to stop and transcribe.

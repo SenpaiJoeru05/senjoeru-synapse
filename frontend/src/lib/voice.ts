@@ -129,6 +129,9 @@ class Player {
 
   private src: AudioBufferSourceNode | null = null
 
+  /** Resolver for the in-flight play(), so stopping ends the wait. */
+  private endedResolve: (() => void) | null = null
+
   /** Non-null only while speaking, so the orb knows when to follow output. */
   analyser: AnalyserNode | null = null
 
@@ -181,7 +184,8 @@ class Player {
 
     trace('play: start')
     await new Promise<void>((resolve) => {
-      src.onended = () => resolve()
+      this.endedResolve = resolve
+      src.onended = () => { this.endedResolve = null; resolve() }
       // Small cushion even with a warm device: scheduling in the future means
       // the stream is already running when the first speech sample lands.
       src.start(ctx.currentTime + LEAD_IN_SECONDS)
@@ -192,7 +196,17 @@ class Player {
     this.stopSource()
   }
 
-  /** Ends the current utterance but keeps the device warm for the next one. */
+  /**
+   * Ends the current utterance but keeps the device warm for the next one.
+   *
+   * Resolving the pending play() is not tidiness, it is the difference between
+   * an interruption and a hang. Nulling `onended` before calling `stop()` — as
+   * this must, or stopping would look like finishing — means the 'ended' event
+   * never fires, so a `play()` awaited by a caller stayed pending forever.
+   * Barge-in therefore stranded whatever was waiting on `say()`: the caller
+   * that interrupts an acknowledgement to speak an answer would simply never
+   * reach the answer.
+   */
   private stopSource() {
     if (this.src) {
       this.src.onended = null
@@ -201,6 +215,10 @@ class Player {
       this.src = null
     }
     this.analyser = null
+
+    const resolve = this.endedResolve
+    this.endedResolve = null
+    resolve?.()
   }
 
   stop() {
