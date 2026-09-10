@@ -861,14 +861,28 @@ export default function Assistant() {
               analyser={analyser}
               active={phase === 'listening'}
               busy={phase === 'thinking' || phase === 'speaking'}
+              size={150}
             />
-            <span className="absolute inset-0 flex items-center justify-center">
-              {phase === 'thinking'
-                ? <Loader2 className="w-5 h-5 text-white/90 animate-spin" />
-                : phase === 'listening'
-                  ? <span className="w-3 h-3 rounded-sm bg-white/90" />
-                  : <Mic className="w-5 h-5 text-white/80" />}
-            </span>
+            {/*
+              The state icon sits at the BOTTOM of the sphere, not its centre.
+              Centred is where the waveform is drawn, and an opaque glyph there
+              covered the one part of this that carries information. Idle is the
+              exception — there is no trace to hide, and a microphone in the
+              middle is the clearest possible "click me".
+            */}
+            {phase === 'idle' ? (
+              <span className="absolute inset-0 flex items-center justify-center">
+                <Mic className="w-5 h-5 text-cyan-200/80" />
+              </span>
+            ) : (
+              <span className="absolute inset-x-0 bottom-1 flex items-center justify-center">
+                {phase === 'thinking'
+                  ? <Loader2 className="w-4 h-4 text-cyan-200/90 animate-spin" />
+                  : phase === 'listening'
+                    ? <span className="w-2.5 h-2.5 rounded-sm bg-cyan-200/90 animate-pulse" />
+                    : <span className="w-2.5 h-2.5 rounded-full bg-cyan-200/90" />}
+              </span>
+            )}
           </button>
 
           <div className="h-4 mt-1 text-[11px] text-gray-500 text-center px-3 truncate max-w-full">
