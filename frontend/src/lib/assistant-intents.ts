@@ -347,8 +347,34 @@ async function answerStatus(): Promise<Answer> {
       .filter(Boolean)
       .map((s) => capitalise(s.replace(/\.$/, '')))
       .join('. ') + '.',
-    lines: tasks.slice(0, 8).map((t) =>
-      `${t.status} · ${t.progress ?? 0}% · ${t.title}`),
+    /*
+     * The unfinished work, not the first eight rows of the file.
+     *
+     * `tasks.slice(0, 8)` took board order and ignored status, which on a real
+     * board is worse than noise — measured against Joel's 19 tasks it showed
+     * eight Completed rows and omitted the single Reviewing task entirely. The
+     * one row worth reading was the one row missing.
+     *
+     * `lines` is meant to carry the detail the SPEECH left out, and the speech
+     * deliberately drops the completed pile. So: what is moving or waiting,
+     * and only then a count of what is behind you.
+     *
+     * When nothing is outstanding the completed list becomes the useful
+     * detail — but most-recent first, since "what did I just finish" is the
+     * question that has an answer then.
+     */
+    lines: (() => {
+      const unfinished = [...working, ...pending]
+      if (unfinished.length) {
+        return [
+          ...unfinished.map((t) => `${t.status} · ${t.progress ?? 0}% · ${t.title}`),
+          done.length ? `+ ${done.length} completed` : '',
+        ].filter(Boolean).slice(0, 8)
+      }
+      const recent = [...done].sort((a, b) =>
+        String(b.lastUpdated ?? '').localeCompare(String(a.lastUpdated ?? '')))
+      return recent.slice(0, 6).map((t) => `Completed · ${t.title}`)
+    })(),
     source: 'local',
   }
 }
