@@ -368,6 +368,8 @@ ipcMain.handle('claude-chat', async (event, { sessionId, agent, text }) => {
   }
 });
 
+ipcMain.handle('claude-chat-cancel', async (_e, sessionId) => claude.cancelChat(sessionId));
+
 ipcMain.handle('claude-chat-forget', async (_e, sessionId) => {
   claude.forget(sessionId);
   return true;

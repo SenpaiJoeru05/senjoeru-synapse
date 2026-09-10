@@ -20,6 +20,14 @@ interface Turn {
   reasoning?: string
   error?: boolean
   seconds?: number
+  /**
+   * What the turn cost, when the runner reports it.
+   *
+   * The CLI does, in its result event, and Chat was discarding it. OpenCode's
+   * free tier reports nothing, which is why this is optional rather than zero
+   * — "free" and "unknown" are different claims.
+   */
+  costUsd?: number
 }
 
 const SUGGESTIONS = [
@@ -352,7 +360,24 @@ export default function JoeruChat() {
     return () => { cancelled = true; clearInterval(t) }
   }, [sending, sessionId])
 
+  /**
+   * Stop whichever runner is actually working.
+   *
+   * This was broken the moment Chat moved onto the CLI: it required
+   * `sessionId`, which is the OPENCODE session, and on the CLI path that stays
+   * null because no OpenCode session is ever created. So the button rendered,
+   * you pressed it, and nothing happened — on turns that can run for minutes
+   * against a ten-minute timeout. A visible control that silently does nothing
+   * is worse than no control.
+   */
   async function stop() {
+    const cliId = cliSessionRef.current
+    if (cliId && window.electronAPI?.claudeChatCancel) {
+      const stopped = await window.electronAPI.claudeChatCancel(cliId)
+      if (stopped) return
+      // Nothing was in flight for the CLI — fall through in case the OpenCode
+      // fallback is the one currently running.
+    }
     if (!sessionId) return
     try { await api.joeruAbort(sessionId) } catch { /* already finished */ }
   }
@@ -394,6 +419,7 @@ export default function JoeruChat() {
 
         const tools: ToolCall[] = []
         let streamed = ''
+        let turnCost: number | null = null
         // Subscribed for the turn only, and unsubscribed in `finally` —
         // leaving it attached would report the same Read once per turn sent.
         const off = api2.onClaudeChatEvent((e) => {
@@ -402,6 +428,11 @@ export default function JoeruChat() {
             tools.push({ tool: e.name ?? 'tool', status: 'running', summary: describeInput(e.input) })
           } else if (e.type === 'text' && e.text) {
             streamed += e.text
+          } else if (e.type === 'done') {
+            // The CLI prices every turn and Chat was discarding it. Showing it
+            // costs nothing, and on a subscription already well past its
+            // budget it is the number worth having in front of you.
+            turnCost = e.costUsd ?? null
           }
           setLive({ role: 'assistant', text: streamed, tools: [...tools] })
         })
@@ -422,6 +453,7 @@ export default function JoeruChat() {
               tool: x.name, status: 'completed', summary: describeInput(x.input),
             })),
             seconds: Math.round((Date.now() - started) / 1000),
+            costUsd: turnCost ?? undefined,
           }])
           return
         }
@@ -648,6 +680,17 @@ export default function JoeruChat() {
                   <div className="flex items-center gap-2 mt-1.5 h-4">
                     {t.seconds !== undefined && (
                       <span className="text-[10px] text-gray-600 tabular-nums">{t.seconds}s</span>
+                    )}
+                    {/* Only when the runner priced it — OpenCode's free tier
+                        reports nothing, and printing $0.0000 there would claim
+                        a measurement that was never taken. */}
+                    {t.costUsd !== undefined && (
+                      <span
+                        title="What this turn cost, as the CLI reported it"
+                        className="text-[10px] text-gray-600 tabular-nums"
+                      >
+                        ${t.costUsd.toFixed(4)}
+                      </span>
                     )}
                     <CopyButton text={t.text} />
                   </div>

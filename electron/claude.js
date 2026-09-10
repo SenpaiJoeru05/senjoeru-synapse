@@ -310,6 +310,17 @@ const CHAT_TIMEOUT_MS = 600_000;
 const started = new Set();
 
 /**
+ * The process serving each session, so a turn can be cancelled precisely.
+ *
+ * Not the module-level `current` that ask() and cancel() share: both the Chat
+ * tab and Assistant Mode go through this file, and `current` holds whichever
+ * spawned last. Pressing stop in Chat would then kill an Assistant Mode answer
+ * that happened to start after it — two windows, one variable, and the wrong
+ * one dies.
+ */
+const inFlight = new Map();
+
+/**
  * Ask within a session. Resolves with the text, and reports tool use as it
  * happens through `onEvent`.
  *
@@ -343,6 +354,7 @@ function chat({ sessionId, agent, text }, onEvent = () => {}) {
 
     started.add(sessionId);
     current = proc;
+    inFlight.set(sessionId, proc);
 
     const tools = [];
     let answer = '';
@@ -400,6 +412,7 @@ function chat({ sessionId, agent, text }, onEvent = () => {}) {
     proc.on('close', (code, signal) => {
       clearTimeout(timer);
       current = null;
+      inFlight.delete(sessionId);
       if (signal) { resolve({ text: answer.trim(), tools, cancelled: true }); return; }
       if (code !== 0) {
         const detail = err.trim().split('\n').filter(Boolean).slice(-3).join(' ');
@@ -414,9 +427,25 @@ function chat({ sessionId, agent, text }, onEvent = () => {}) {
   });
 }
 
+/**
+ * Stop the turn in flight for one session.
+ *
+ * Returns whether there was anything to stop, so the caller can tell a real
+ * cancellation from a button pressed after the answer already landed.
+ */
+function cancelChat(sessionId) {
+  const proc = inFlight.get(sessionId);
+  if (!proc || proc.killed) return false;
+  try { proc.kill(); } catch { /* already gone */ }
+  inFlight.delete(sessionId);
+  return true;
+}
+
 /** Forget a session, so a fresh one with the same id starts rather than resumes. */
 function forget(sessionId) {
   started.delete(sessionId);
 }
 
-module.exports = { ask, chat, forget, cancel, describe, MODEL, AGENT, ALLOWED_TOOLS };
+module.exports = {
+  ask, chat, cancelChat, forget, cancel, describe, MODEL, AGENT, ALLOWED_TOOLS,
+};

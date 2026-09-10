@@ -80,6 +80,12 @@ export interface ElectronAPI {
     /** Set instead of throwing, so the caller can fall back to OpenCode. */
     error?: string
   }>
+  /**
+   * Stop the turn in flight for one session. Resolves false when there was
+   * nothing running, so a button pressed after the answer landed is
+   * distinguishable from a real cancellation.
+   */
+  claudeChatCancel?: (sessionId: string) => Promise<boolean>
   /** Drop a session so the next turn starts fresh rather than resuming. */
   claudeChatForget?: (sessionId: string) => Promise<boolean>
   /** Live tool activity for the turn in flight. Returns an unsubscribe function. */
