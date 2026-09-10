@@ -15,7 +15,7 @@
  */
 import { api } from './api'
 
-export type Intent = 'status' | 'next' | 'spend' | 'broken' | 'ask'
+export type Intent = 'status' | 'next' | 'spend' | 'broken' | 'chat' | 'ask'
 
 export interface Answer {
   intent: Intent
@@ -29,6 +29,49 @@ export interface Answer {
    * joeru spends free-tier requests.
    */
   source: 'local' | 'joeru' | 'claude'
+}
+
+/**
+ * Words that carry no request — the ones a closing remark is made of.
+ *
+ * "ok thanks" used to reach Claude Haiku wrapped in "answer using ONLY the
+ * current state", and with no question in it the model did the most literal
+ * thing available: it read out the most urgent thing in the state. The reply
+ * was "you're over budget, five hundred eighty-five percent on the week" —
+ * true, sourced from the attention queue, and completely unrelated to what was
+ * said. It also spent quota and thirteen seconds to say it.
+ *
+ * Matched by requiring EVERY word to be in here, not by looking for "thanks"
+ * anywhere. "thanks, what is the status" is a real question that happens to
+ * open with courtesy, and a substring test would swallow it.
+ *
+ * Kept deliberately tight. Words that could carry a question — "all", "done",
+ * "that", "what" — are left out even though they appear in closing remarks,
+ * because "all done?" is a genuine question and answering it with "anytime"
+ * would be worse than the bug this fixes.
+ */
+const COURTESY = new Set([
+  'ok', 'okay', 'k', 'kk', 'alright', 'right', 'cool', 'nice', 'great',
+  'awesome', 'perfect', 'excellent', 'lovely', 'sweet',
+  'thanks', 'thank', 'you', 'thx', 'ty', 'cheers', 'appreciated',
+  'got', 'it', 'i', 'see', 'understood', 'noted', 'gotcha',
+  'sure', 'yep', 'yeah', 'yup', 'nope', 'nah',
+  // Intensifiers, so "thanks so much" and "thanks a lot" land here too.
+  'much', 'lot', 'a', 'very',
+  // "good" is safe only because the phrases that would trap it carry a word
+  // from outside this set: "all good" has "all", "is it good" has "is".
+  'good', 'hi', 'hello', 'hey', 'yo', 'morning', 'evening',
+  'bye', 'goodbye', 'later', 'night', 'nevermind', 'nvm', 'never', 'mind',
+  'joeru', 'please', 'lol', 'haha', 'well', 'so', 'um', 'uh',
+])
+
+const words = (s: string) =>
+  String(s).toLowerCase().replace(/[^a-z\s]/g, ' ').split(/\s+/).filter(Boolean)
+
+/** True when the whole utterance is courtesy and asks for nothing. */
+export function isSmallTalk(question: string): boolean {
+  const w = words(question)
+  return w.length > 0 && w.length <= 5 && w.every((x) => COURTESY.has(x))
 }
 
 const RULES: [RegExp, Intent][] = [
@@ -48,8 +91,41 @@ const RULES: [RegExp, Intent][] = [
 ]
 
 export function classify(question: string): Intent {
+  // Before the keyword rules, because this is decided by what the utterance is
+  // ENTIRELY made of, and a rule that merely looks for words would let
+  // "thanks, what's the status" be mistaken for a closing remark.
+  if (isSmallTalk(question)) return 'chat'
   for (const [re, intent] of RULES) if (re.test(question)) return intent
   return 'ask'
+}
+
+/**
+ * Reply to a closing remark or a greeting.
+ *
+ * Answered here rather than by the model on purpose: it is instant, costs no
+ * quota, and — the actual point — it cannot decide to tell you about your
+ * budget instead. There is no data in scope to get wrong.
+ */
+const GREETING = /^(hi|hello|hey|yo|morning|evening)\b/i
+const FAREWELL = /^(bye|goodbye|later|night|good\s?night)\b/i
+
+const CHAT_REPLIES = {
+  greeting: ['Hello.', 'Hi. What do you need?', 'Hey.'],
+  farewell: ['Talk later.', 'Goodbye.'],
+  thanks: ['Anytime.', 'No problem.', 'Sure.', 'Any time.'],
+}
+
+function answerChat(question: string): Answer {
+  const kind = GREETING.test(question.trim()) ? 'greeting'
+    : FAREWELL.test(question.trim()) ? 'farewell'
+      : 'thanks'
+  const pool = CHAT_REPLIES[kind]
+  return {
+    intent: 'chat',
+    speech: pool[Math.floor(Math.random() * pool.length)],
+    lines: [],
+    source: 'local',
+  }
 }
 
 /**
@@ -291,6 +367,7 @@ export async function answerLocally(question: string): Promise<Answer | null> {
     case 'status': return answerStatus()
     case 'spend': return answerSpend()
     case 'broken': return answerBroken()
+    case 'chat': return answerChat(question)
     default: return null
   }
 }

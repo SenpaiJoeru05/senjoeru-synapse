@@ -70,30 +70,84 @@ export async function currentState(): Promise<string> {
   return lines.join('\n')
 }
 
+/** One exchange, as the model should see it. */
+export interface Exchange {
+  question: string
+  answer: string
+}
+
 /**
- * Wraps a question with the state and the rules for using it.
+ * The recent conversation, so a follow-up means what it says.
  *
- * The prohibitions are specific because the observed failure was specific: it
- * invented a summary of the board and then asked the user to supply the answer.
- * Both are worse than "I don't know" — a voice assistant that hands the
- * question back has done nothing, and one that guesses cannot be trusted on
- * the answers that happen to be right.
+ * Every call is a fresh `claude -p` process with no memory of the last one, so
+ * "mark that as complete" arrived with nothing for "that" to refer to. It has
+ * appeared to work, which is worse than failing: asked to mark "that" complete
+ * it went and found the single task in Reviewing and was right by luck. With
+ * two such tasks it would have picked one.
+ *
+ * Four exchanges, not the whole session. Every line is re-sent on every
+ * question — there is no server-side session to append to — so history is paid
+ * for in full each time, and a voice conversation refers back a turn or two,
+ * not twenty.
  */
-export function ground(question: string, state: string): string {
+const HISTORY_TURNS = 4
+
+/** Long answers are truncated: enough to resolve a reference, not to re-read. */
+const HISTORY_CHARS = 400
+
+function history(recent: Exchange[]): string[] {
+  const use = recent.slice(-HISTORY_TURNS).filter((e) => e.question && e.answer)
+  if (!use.length) return []
   return [
+    '--- CONVERSATION SO FAR (oldest first) ---',
+    ...use.flatMap((e) => [
+      `Me: ${e.question}`,
+      `You: ${e.answer.length > HISTORY_CHARS
+        ? `${e.answer.slice(0, HISTORY_CHARS)}…` : e.answer}`,
+    ]),
+    '--- END CONVERSATION ---',
+    '',
+  ]
+}
+
+/**
+ * Wraps a question with the state, the recent conversation, and the rules.
+ *
+ * The prohibitions are specific because each observed failure was specific.
+ * It invented a summary of the board and asked the user to supply the answer.
+ * And told "ok thanks" — which is not a question at all — it obeyed "answer
+ * from the state" literally and read out the most urgent thing in it, a budget
+ * overrun nobody had asked about. Both are worse than saying nothing useful:
+ * one cannot be trusted even when right, the other answers a question that was
+ * never asked.
+ */
+export function ground(question: string, state: string, recent: Exchange[] = []): string {
+  return [
+    'You are answering one turn of a spoken conversation.',
+    '',
     'Answer using ONLY the CURRENT STATE below. It is read live from the',
     'dashboard and is authoritative — prefer it over anything you remember or',
     'infer, and do not go looking for files to confirm it.',
+    '',
+    'Answer the question that was actually asked, and nothing else. Do not',
+    'volunteer other things from the state because they look urgent — if the',
+    'question is about tasks, do not mention spend. If what was said is not a',
+    'question at all, reply in a few words as a person would and report no',
+    'state whatsoever.',
     '',
     'If the state does not contain the answer, say plainly that you cannot see',
     'it and name what is missing. Never guess a number, never describe the',
     'board without reading it here, and never ask the user to supply the answer',
     'you were asked for. Anything marked UNAVAILABLE is genuinely unknown.',
     '',
+    'Resolve "that", "it" and "the one you mentioned" against the conversation',
+    'below. If a reference is still ambiguous, ask which one — do not pick.',
+    '',
+    ...history(recent),
     '--- CURRENT STATE ---',
     state,
     '--- END STATE ---',
     '',
-    `Question: ${question}`,
+    `Me: ${question}`,
   ].join('\n')
 }

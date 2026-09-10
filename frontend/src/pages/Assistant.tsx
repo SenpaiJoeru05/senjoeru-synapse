@@ -17,7 +17,7 @@ import { answerLocally, classify, type Answer } from '../lib/assistant-intents'
 import { api } from '../lib/api'
 import VoiceOrb from '../components/VoiceOrb'
 import type { AssistantInsights } from '../electron'
-import { currentState, ground } from '../lib/grounding'
+import { currentState, ground, type Exchange } from '../lib/grounding'
 import { acknowledgement } from '../lib/acknowledge'
 import {
   say, hush, hear, stopHearing, voiceAvailable, disposeVoice, MicLevel,
@@ -185,6 +185,15 @@ export default function Assistant() {
   const stopListeningRef = useRef<(() => void) | null>(null)
   /** True only while the "on it" line is playing, not the answer. */
   const ackingRef = useRef(false)
+  /**
+   * The last few exchanges, sent with each question so follow-ups resolve.
+   *
+   * A ref rather than state because `ask` must always read the newest value.
+   * Held as state it would be captured in the callback's closure, and a
+   * question asked right after an answer would ship the history from before
+   * it — the one turn that matters most for "mark that as complete".
+   */
+  const recentRef = useRef<Exchange[]>([])
   const sessionRef = useRef<string | null>(null)
   const busy = phase !== 'idle'
 
@@ -261,6 +270,16 @@ export default function Assistant() {
     }
   }, [])
 
+  /**
+   * Record an exchange for the next question's context.
+   *
+   * A few more than ground() sends, so it can pick the most recent without
+   * this having to know how many that is.
+   */
+  const remember = useCallback((question: string, answer: string) => {
+    recentRef.current = [...recentRef.current, { question, answer }].slice(-8)
+  }, [])
+
   async function ensureSession(): Promise<string> {
     if (sessionRef.current) return sessionRef.current
     const s = await api.joeruCreateSession('Assistant Mode (voice)')
@@ -293,6 +312,7 @@ export default function Assistant() {
       const local = await answerLocally(q)
       if (local) {
         log('local', local.intent)
+        remember(q, local.speech)
         setTurns((t) => [...t.slice(0, -1), { question: q, answer: local }])
         await speakAnswer(local.speech)
         return
@@ -325,13 +345,16 @@ export default function Assistant() {
           // board and asks the user to supply the answer — observed, not
           // hypothetical. See lib/grounding.ts.
           const state = await currentState()
-          const answer = (await window.electronAPI.claudeAsk(ground(q, state))).trim()
+          const answer = (await window.electronAPI.claudeAsk(
+            ground(q, state, recentRef.current),
+          )).trim()
           if (answer) {
             // Let the acknowledgement finish its last word. Cutting speech
             // mid-syllable to start the answer sounds like a fault, and by now
             // it has usually long finished anyway.
             await acked
             log('claude')
+            remember(q, answer)
             setTurns((t) => [...t.slice(0, -1), {
               question: q,
               answer: { intent: 'ask', speech: answer, lines: [], source: 'claude' },
@@ -357,6 +380,7 @@ export default function Assistant() {
       if (failure && !text) {
         await acked   // as above: never talk over the acknowledgement
         log('failed')
+        remember(q, failure)
         setTurns((t) => [...t.slice(0, -1), {
           question: q,
           answer: { intent: 'ask', speech: failure, lines: [], source: 'joeru' },
@@ -370,6 +394,7 @@ export default function Assistant() {
       await acked   // as above: never talk over the acknowledgement
       log('joeru')
       const said = text || 'Joeru returned nothing.'
+      remember(q, said)
       setTurns((t) => [...t.slice(0, -1), {
         question: q,
         answer: { intent: 'ask', speech: said, lines: [], source: 'joeru' },
@@ -386,7 +411,7 @@ export default function Assistant() {
       }])
       setPhase('idle')
     }
-  }, [speakAnswer, speakAck])
+  }, [speakAnswer, speakAck, remember])
 
   /**
    * What to do with a transcription, shared by both recognisers.
