@@ -24,6 +24,10 @@ import {
   type ActionParse as TaskAction, type TaskRef, type TaskStatus,
 } from '../lib/task-actions'
 import {
+  parse as parseMemory, apply as applyMemory,
+  confirmationFor as memoryConfirmation, type MemoryDraft,
+} from '../lib/memory-actions'
+import {
   say, hush, hear, stopHearing, voiceAvailable, disposeVoice, MicLevel,
   usesMainProcessCapture, beginListening, endListening, abortListening,
   type Heard,
@@ -199,13 +203,22 @@ export default function Assistant() {
    */
   const recentRef = useRef<Exchange[]>([])
   /**
-   * A task change that has been understood but NOT performed.
+   * A change that has been understood but NOT performed.
    *
-   * Held until an explicit yes. Every other intent only reads, so a
-   * misrecognition costs a moment; this one writes, and "mark task three
-   * complete" heard as task eight is not undone by saying no afterwards.
+   * Held until an explicit yes. Read-only intents can afford to act on a
+   * misrecognition — it costs a moment. These two write: "mark task three
+   * complete" heard as task eight is not undone by saying no afterwards, and a
+   * misheard memory is worse than a missing one, being wrong, permanent, and
+   * read as authoritative by every agent after it.
+   *
+   * One ref for both kinds rather than one each, so there can only ever be a
+   * single outstanding question. Two would let a yes answer the wrong one.
    */
-  const pendingRef = useRef<{ task: TaskRef; status: TaskStatus } | null>(null)
+  const pendingRef = useRef<
+    | { kind: 'task'; task: TaskRef; status: TaskStatus }
+    | { kind: 'memory'; draft: MemoryDraft }
+    | null
+  >(null)
   const sessionRef = useRef<string | null>(null)
   const busy = phase !== 'idle'
 
@@ -304,6 +317,27 @@ export default function Assistant() {
   }, [])
 
   /**
+   * File a confirmed memory, and say where it went.
+   *
+   * The folder and filename are spoken back on success because they are how
+   * you would find it again — and because they were chosen by a heuristic, so
+   * hearing "as a preference" is the moment to notice it guessed wrong.
+   */
+  const saveMemory = useCallback(async (draft: MemoryDraft) => {
+    try {
+      const r = await applyMemory(draft)
+      const verb = r?.created === false ? 'Updated' : 'Filed'
+      return `${verb} under ${draft.folder}, as ${draft.slug}.`
+    } catch (e: any) {
+      const reason = e?.response?.data?.error ?? e?.message ?? e
+      setStatus(`could not save that memory: ${reason}`)
+      // Named out loud, because a memory you believe was filed and was not is
+      // the failure that costs you the fact.
+      return `I could not save that. ${reason}`
+    }
+  }, [])
+
+  /**
    * Turn a parsed command into something to say — and, when it is
    * unambiguous, arm the confirmation.
    *
@@ -317,7 +351,7 @@ export default function Assistant() {
     action: Exclude<TaskAction, { kind: 'none' }>,
   ): Promise<string> => {
     if (action.kind === 'ready') {
-      pendingRef.current = { task: action.task, status: action.status }
+      pendingRef.current = { kind: 'task', task: action.task, status: action.status }
       return confirmationFor(action.task, action.status)
     }
     if (action.kind === 'ambiguous') {
@@ -370,11 +404,12 @@ export default function Assistant() {
       if (pending) {
         pendingRef.current = null
         if (isYes(q)) {
-          const done = await applyTaskStatus(pending.task.id, pending.status)
-          const said = done
-            ? `Done. ${pending.task.title} is now ${pending.status.toLowerCase()}.`
-            : `I could not update ${pending.task.title}.`
-          log('local', 'task-action')
+          const said = pending.kind === 'task'
+            ? (await applyTaskStatus(pending.task.id, pending.status)
+              ? `Done. ${pending.task.title} is now ${pending.status.toLowerCase()}.`
+              : `I could not update ${pending.task.title}.`)
+            : await saveMemory(pending.draft)
+          log('local', pending.kind === 'task' ? 'task-action' : 'memory-write')
           remember(q, said)
           setTurns((t) => [...t.slice(0, -1), {
             question: q,
@@ -396,6 +431,40 @@ export default function Assistant() {
         }
         // Neither — fall through and answer it as a question, having cancelled.
         setStatus('Cancelled the change.')
+      }
+
+      /*
+       * "Remember that…" before task commands, because they collide.
+       *
+       * Task parsing needs an instruction verb AND a status word, and "make a
+       * note that the whisper work is done" has both — "make" and "done" — so
+       * reaching task parsing first would file nothing and instead offer to
+       * complete a task nobody mentioned. Memory verbs are unambiguous, so
+       * testing them first costs nothing and removes the overlap.
+       */
+      const memory = parseMemory(q)
+      if (memory.kind !== 'none') {
+        const said = memory.kind === 'ready'
+          ? (() => {
+            pendingRef.current = { kind: 'memory', draft: memory.draft }
+            return memoryConfirmation(memory.draft)
+          })()
+          : 'Remember what?'
+        log('local', 'memory-write')
+        remember(q, said)
+        setTurns((t) => [...t.slice(0, -1), {
+          question: q,
+          answer: {
+            intent: 'chat',
+            speech: said,
+            lines: memory.kind === 'ready'
+              ? [`${memory.draft.folder}/${memory.draft.slug}.md`]
+              : [],
+            source: 'local',
+          },
+        }])
+        await speakAnswer(said)
+        return
       }
 
       /*
@@ -528,7 +597,7 @@ export default function Assistant() {
       }])
       setPhase('idle')
     }
-  }, [speakAnswer, speakAck, remember, applyTaskStatus, describeAction])
+  }, [speakAnswer, speakAck, remember, applyTaskStatus, describeAction, saveMemory])
 
   /**
    * What to do with a transcription, shared by both recognisers.
