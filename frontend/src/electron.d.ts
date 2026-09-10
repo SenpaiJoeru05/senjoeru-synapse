@@ -95,6 +95,14 @@ export interface ElectronAPI {
     turns: { role: 'user' | 'assistant'; text: string; tools?: { name: string; input: unknown }[] }[]
     error?: string
   }>
+  /** Set a title, or clear it with an empty string to restore the derived one. */
+  claudeSessionRename?: (id: string, title: string) => Promise<{ id?: string; title?: string | null; error?: string }>
+  /** Delete a conversation. Idempotent — a missing one reports removed:false. */
+  claudeSessionDelete?: (id: string) => Promise<{ removed: boolean; reason?: string; error?: string }>
+  /** Find a phrase across stored conversations. Needs at least two characters. */
+  claudeSessionSearch?: (query: string) => Promise<{
+    id: string; title: string; snippet: string; matches: number; updated: number
+  }[]>
   /** Drop a session so the next turn starts fresh rather than resuming. */
   claudeChatForget?: (sessionId: string) => Promise<boolean>
   /** Live tool activity for the turn in flight. Returns an unsubscribe function. */

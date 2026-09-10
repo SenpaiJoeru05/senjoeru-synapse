@@ -387,6 +387,34 @@ ipcMain.handle('claude-session-read', async (_e, id) => {
   }
 });
 
+ipcMain.handle('claude-session-rename', async (_e, { id, title }) => {
+  try {
+    return claudeSessions.rename(id, title);
+  } catch (err) {
+    return { error: err.message };
+  }
+});
+
+/**
+ * Delete a conversation. The only write this app makes to the CLI store, and
+ * it unlinks one validated uuid inside the resolved session directory.
+ */
+ipcMain.handle('claude-session-delete', async (_e, id) => {
+  try {
+    return claudeSessions.remove(id);
+  } catch (err) {
+    return { removed: false, error: err.message };
+  }
+});
+
+ipcMain.handle('claude-session-search', async (_e, query) => {
+  try {
+    return claudeSessions.search(PROJECT_DIR, query);
+  } catch {
+    return [];
+  }
+});
+
 ipcMain.handle('claude-chat-cancel', async (_e, sessionId) => claude.cancelChat(sessionId));
 
 ipcMain.handle('claude-chat-forget', async (_e, sessionId) => {

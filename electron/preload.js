@@ -40,6 +40,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   claudeChat: (args) => ipcRenderer.invoke('claude-chat', args),
   claudeSessions: () => ipcRenderer.invoke('claude-sessions'),
   claudeSessionRead: (id) => ipcRenderer.invoke('claude-session-read', id),
+  claudeSessionRename: (id, title) => ipcRenderer.invoke('claude-session-rename', { id, title }),
+  claudeSessionDelete: (id) => ipcRenderer.invoke('claude-session-delete', id),
+  claudeSessionSearch: (query) => ipcRenderer.invoke('claude-session-search', query),
   claudeChatCancel: (sessionId) => ipcRenderer.invoke('claude-chat-cancel', sessionId),
   claudeChatForget: (sessionId) => ipcRenderer.invoke('claude-chat-forget', sessionId),
   /**

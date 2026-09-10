@@ -3,7 +3,7 @@ import { motion } from 'framer-motion'
 import {
   Send, Bot, Loader2, PlugZap, Copy, Check,
   ChevronRight, Brain, Terminal, Plus, PanelLeftClose, PanelLeft, MessageSquare,
-  Square, Users,
+  Square, Users, Pencil, RotateCcw, Trash2, Search, X,
 } from 'lucide-react'
 import { api } from '@/lib/api'
 import Markdown from '@/components/Markdown'
@@ -217,6 +217,11 @@ export default function JoeruChat() {
    * left the open conversation unmarked in the list.
    */
   const [selected, setSelected] = useState<string | null>(null)
+  /** The row whose title is being edited, if any. */
+  const [renamingId, setRenamingId] = useState<string | null>(null)
+  /** Search box contents. Two characters minimum, enforced main-process side. */
+  const [query, setQuery] = useState('')
+  const [searching, setSearching] = useState(false)
   const [runner, setRunner] = useState<'claude' | 'opencode' | null>(null)
 
   /**
@@ -269,6 +274,61 @@ export default function JoeruChat() {
    * Both shapes are normalised here rather than at the render site, so the
    * sidebar does not have to know which store it is looking at.
    */
+  /**
+   * Commit or cancel a rename.
+   *
+   * An empty value clears the stored title rather than setting a blank one,
+   * which restores the derived first-message title. That is why the input
+   * starts empty for an un-renamed conversation and shows the current title
+   * as a placeholder: typing nothing and pressing Enter is then a no-op
+   * instead of erasing the name you could see.
+   */
+  async function commitRename(id: string, value: string) {
+    setRenamingId(null)
+    const next = value.trim()
+    const row = sessions.find((s: any) => s.id === id)
+    // Nothing typed and nothing stored — nothing to do. Without this, opening
+    // and dismissing the field would issue a pointless write.
+    if (!next && !row?.renamed) return
+    if (next && next === row?.title) return
+    try {
+      await window.electronAPI?.claudeSessionRename?.(id, next)
+    } catch { /* the refresh below shows the truth either way */ }
+    await refreshSessions()
+  }
+
+  /**
+   * Delete a conversation, with a confirmation that names it.
+   *
+   * `confirm` rather than a bespoke dialog: this is destructive and
+   * irreversible — the transcript is unlinked from disk — and a native prompt
+   * is the one thing that cannot be dismissed by a stray click on the row
+   * behind it.
+   */
+  async function removeSession(id: string, title: string) {
+    const label = title && title.length > 60 ? `${title.slice(0, 57)}…` : title
+    // eslint-disable-next-line no-alert
+    if (!window.confirm(`Delete “${label}”?\n\nThis removes the transcript from disk and cannot be undone.`)) return
+
+    const res = await window.electronAPI?.claudeSessionDelete?.(id)
+    if (res && !res.removed) {
+      // Reported rather than swallowed: a delete that quietly did nothing
+      // leaves you deleting the same row repeatedly.
+      setTurns(t => [...t, {
+        role: 'assistant', error: true,
+        text: `Could not delete that conversation: ${res.error || res.reason || 'unknown reason'}`,
+      }])
+    }
+    // The open conversation was the one deleted, so stop pointing at it.
+    if (id === selected) {
+      setSelected(null)
+      setTurns([])
+      if (cliSessionRef.current === id) cliSessionRef.current = null
+      setRunner(null)
+    }
+    await refreshSessions()
+  }
+
   async function refreshSessions() {
     const cli = window.electronAPI?.claudeSessions
     if (cli) {
@@ -298,6 +358,54 @@ export default function JoeruChat() {
   }
 
   useEffect(() => { refreshSessions() }, [health?.running])
+
+  /**
+   * Run the search, debounced, and put the results in the list.
+   *
+   * Debounced because each keystroke would otherwise read every transcript in
+   * the directory. 250ms is below the point where typing feels laggy and above
+   * the rate at which anyone types.
+   *
+   * `alive` guards the write: a slow query for "pack" must not overwrite the
+   * results for "package" that were requested after it and returned first.
+   * Out-of-order responses are the classic search bug and they look like the
+   * filter simply not working.
+   */
+  useEffect(() => {
+    const q = query.trim()
+    const find = window.electronAPI?.claudeSessionSearch
+    if (!find || q.length < 2) {
+      setSearching(false)
+      // Clearing the box restores the full list rather than leaving the last
+      // result set stranded there.
+      if (q.length === 0) refreshSessions()
+      return
+    }
+
+    let alive = true
+    setSearching(true)
+    const timer = window.setTimeout(async () => {
+      try {
+        const hits = await find(q)
+        if (!alive) return
+        setSessions((hits || []).map((h) => ({
+          id: h.id,
+          title: h.title,
+          snippet: h.snippet,
+          matches: h.matches,
+          time: { updated: h.updated },
+          runner: 'claude' as const,
+        })))
+      } catch {
+        if (alive) setSessions([])
+      } finally {
+        if (alive) setSearching(false)
+      }
+    }, 250)
+
+    return () => { alive = false; window.clearTimeout(timer) }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query])
 
   /**
    * Load a past conversation, including ones started in the OpenCode TUI.
@@ -453,18 +561,88 @@ export default function JoeruChat() {
     try { await api.joeruAbort(sessionId) } catch { /* already finished */ }
   }
 
+  /**
+   * Ask the last question again, differently.
+   *
+   * Called "retry", not "regenerate", because with a persistent session that
+   * is what it honestly is. The CLI session already holds the question AND the
+   * answer, and there is no rewind — `--fork-session` continues from the
+   * current point rather than unwinding to an earlier one. So this cannot
+   * discard the previous answer the way ChatGPT's regenerate does; it asks
+   * again with an explicit instruction not to repeat itself.
+   *
+   * That is worth stating in the tooltip rather than hiding, because the
+   * difference is visible: the model has seen its own last attempt, which
+   * usually helps and occasionally anchors it.
+   */
+  async function retry() {
+    if (sending) return
+    const lastUser = [...turns].reverse().find((t) => t.role === 'user')
+    if (!lastUser) return
+    // Drop the answer being replaced from the view. The session still has it;
+    // this is the transcript, not the context.
+    setTurns((t) => {
+      const out = [...t]
+      while (out.length && out[out.length - 1].role === 'assistant') out.pop()
+      return out
+    })
+    await send(
+      'Answer my previous question again, and differently — take another '
+      + 'approach rather than restating your last answer. The question was: '
+      + lastUser.text,
+      { silent: true },
+    )
+  }
+
+  /**
+   * Put a previous message back in the box, and forget everything after it.
+   *
+   * Editing means the original question was wrong, so continuing the same
+   * session would leave the mistake in context and the model would keep
+   * seeing it. This starts a FRESH session: the turns before the edited one
+   * stay on screen as history you can read, but the new session has not seen
+   * them, and the header says `claude code · expected` again to make that
+   * visible rather than silent.
+   *
+   * A deliberate trade. Replaying the earlier turns into the new session would
+   * preserve context and cost a full re-send of the transcript, which is the
+   * expense sessions exist to avoid.
+   */
+  function editFrom(index: number) {
+    if (sending) return
+    const turn = turns[index]
+    if (!turn || turn.role !== 'user') return
+
+    setDraft(turn.text)
+    setTurns(turns.slice(0, index))
+    if (cliSessionRef.current) {
+      window.electronAPI?.claudeChatForget?.(cliSessionRef.current)
+      cliSessionRef.current = null
+    }
+    setRunner(null)
+    inputRef.current?.focus()
+  }
+
   function grow(el: HTMLTextAreaElement) {
     el.style.height = 'auto'
     el.style.height = `${Math.min(el.scrollHeight, 200)}px`
   }
 
-  async function send(preset?: string) {
+  async function send(preset?: string, opts?: { silent?: boolean }) {
     const text = (preset ?? draft).trim()
     if (!text || sending) return
 
     setDraft('')
     if (inputRef.current) inputRef.current.style.height = 'auto'
-    setTurns(t => [...t, { role: 'user', text }])
+    /*
+     * `silent` sends without adding a user bubble.
+     *
+     * Retry needs it: the question is already on screen above the answer being
+     * replaced, and the instruction actually sent ("answer again, differently
+     * — the question was …") is scaffolding, not something you typed. Showing
+     * it would put words in your mouth in your own transcript.
+     */
+    if (!opts?.silent) setTurns(t => [...t, { role: 'user', text }])
     setSending(true)
 
     const started = Date.now()
@@ -631,29 +809,130 @@ export default function JoeruChat() {
             </button>
           </div>
 
+          {/* Search, only where there is a store to search. OpenCode exposes
+              no full-text endpoint over its sessions, so offering the box on
+              that path would be a control that never returns anything. */}
+          {window.electronAPI?.claudeSessionSearch && (
+            <div className="px-2 pb-2">
+              <div className="relative">
+                <Search className="w-3 h-3 absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-600" />
+                <input
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder="Search conversations"
+                  className="w-full pl-7 pr-7 py-1.5 rounded-lg bg-white/[0.04] border border-white/10
+                             text-[11px] placeholder:text-gray-600 focus:border-white/25 focus:outline-none"
+                />
+                {query && (
+                  <button
+                    onClick={() => setQuery('')}
+                    title="Clear"
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-600 hover:text-gray-300"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                )}
+              </div>
+              {query.trim().length === 1 && (
+                <p className="text-[10px] text-gray-600 mt-1 px-0.5">Two characters minimum.</p>
+              )}
+            </div>
+          )}
+
           <div className="flex-1 overflow-y-auto px-2 pb-2 space-y-0.5">
-            {sessions.length === 0 && (
-              <p className="text-[11px] text-gray-600 px-2 py-3">No conversations yet.</p>
+            {searching && (
+              <p className="text-[11px] text-gray-600 px-2 py-3 flex items-center gap-1.5">
+                <Loader2 className="w-3 h-3 animate-spin" /> searching…
+              </p>
+            )}
+            {!searching && sessions.length === 0 && (
+              <p className="text-[11px] text-gray-600 px-2 py-3">
+                {query.trim().length >= 2 ? `Nothing matches “${query.trim()}”.` : 'No conversations yet.'}
+              </p>
             )}
             {sessions.map(s => (
-              <button key={s.id} onClick={() => openSession(s.id)}
-                className={`w-full text-left px-2.5 py-2 rounded-lg transition-colors group ${
+              /*
+                A div, not a button. The row holds rename and delete controls,
+                and a button inside a button is invalid HTML — the browser
+                un-nests it and the inner control stops receiving clicks. The
+                title is the clickable element instead.
+              */
+              <div key={s.id}
+                className={`px-2.5 py-2 rounded-lg transition-colors group ${
                   s.id === selected ? 'bg-white/[0.07]' : 'hover:bg-white/[0.03]'
                 }`}>
                 <div className="flex items-center gap-1.5">
                   <MessageSquare className={`w-3 h-3 shrink-0 ${
                     s.id === selected ? 'text-indigo-300' : 'text-gray-600'
                   }`} />
-                  <span className={`text-[12px] truncate ${
-                    s.id === selected ? 'text-gray-100' : 'text-gray-400 group-hover:text-gray-300'
-                  }`}>
-                    {s.title || s.slug || 'Untitled'}
-                  </span>
+
+                  {renamingId === s.id ? (
+                    <input
+                      autoFocus
+                      defaultValue={s.renamed ? s.title : ''}
+                      placeholder={s.title}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') commitRename(s.id, e.currentTarget.value)
+                        if (e.key === 'Escape') setRenamingId(null)
+                      }}
+                      // Committing on blur as well as Enter, because clicking
+                      // away is what people do and losing the typing there
+                      // reads as the feature not working.
+                      onBlur={(e) => commitRename(s.id, e.currentTarget.value)}
+                      className="flex-1 min-w-0 bg-black/30 border border-white/20 rounded px-1.5 py-0.5
+                                 text-[12px] text-gray-100 focus:outline-none focus:border-indigo-400/50"
+                    />
+                  ) : (
+                    <>
+                      <button
+                        onClick={() => openSession(s.id)}
+                        className={`flex-1 min-w-0 text-left text-[12px] truncate ${
+                          s.id === selected ? 'text-gray-100' : 'text-gray-400 group-hover:text-gray-300'
+                        }`}
+                      >
+                        {s.title || s.slug || 'Untitled'}
+                      </button>
+
+                      {/* Actions only for the CLI store — an OpenCode session
+                          has no rename or delete behind it, and a control that
+                          silently does nothing is worse than an absent one. */}
+                      {s.runner === 'claude' && (
+                        <span className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                          <button
+                            onClick={() => setRenamingId(s.id)}
+                            title={s.renamed ? 'Rename — empty restores the original' : 'Rename'}
+                            className="p-0.5 text-gray-600 hover:text-gray-200"
+                          >
+                            <Pencil className="w-3 h-3" />
+                          </button>
+                          <button
+                            onClick={() => removeSession(s.id, s.title)}
+                            title="Delete this conversation permanently"
+                            className="p-0.5 text-gray-600 hover:text-red-400"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </button>
+                        </span>
+                      )}
+                    </>
+                  )}
                 </div>
-                <span className="text-[10px] text-gray-700 pl-4.5 ml-0.5">
+
+                <button
+                  onClick={() => openSession(s.id)}
+                  className="block w-full text-left text-[10px] text-gray-700 pl-4.5 ml-0.5"
+                >
                   {relativeTime(s.time?.updated)}
-                </span>
-              </button>
+                  {s.matches ? ` · ${s.matches} match${s.matches === 1 ? '' : 'es'}` : ''}
+                </button>
+
+                {/* Why it matched, when searching. */}
+                {s.snippet && (
+                  <p className="text-[10px] text-gray-600 pl-4.5 ml-0.5 mt-0.5 line-clamp-2">
+                    {s.snippet}
+                  </p>
+                )}
+              </div>
             ))}
           </div>
         </aside>
@@ -730,7 +1009,19 @@ export default function JoeruChat() {
           {turns.map((t, i) =>
             t.role === 'user' ? (
               <motion.div key={i} initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }}
-                className="flex justify-end">
+                className="flex justify-end items-start gap-1.5 group">
+                {/* Edit appears on hover only. A destructive-looking control
+                    sitting permanently beside every message you ever sent is
+                    noise, and this one discards the turns after it. */}
+                <button
+                  onClick={() => editFrom(i)}
+                  disabled={sending}
+                  title="Edit this message — drops everything after it and starts a fresh session"
+                  className="opacity-0 group-hover:opacity-100 transition-opacity mt-2
+                             text-gray-600 hover:text-gray-300 disabled:opacity-0"
+                >
+                  <Pencil className="w-3 h-3" />
+                </button>
                 <div className="max-w-[80%] px-4 py-2.5 rounded-2xl rounded-br-md text-sm
                                 bg-indigo-500/15 border border-indigo-500/25 whitespace-pre-wrap break-words">
                   {t.text}
@@ -773,6 +1064,21 @@ export default function JoeruChat() {
                       </span>
                     )}
                     <CopyButton text={t.text} />
+                    {/* Only on the newest answer: retrying an older one would
+                        ask the question again at the end of a conversation
+                        that has since moved on, and the reply would land in
+                        the wrong place. */}
+                    {i === turns.length - 1 && !t.error && (
+                      <button
+                        onClick={retry}
+                        disabled={sending}
+                        title="Ask again, differently. The session keeps the previous answer in context — there is no rewind."
+                        className="opacity-0 group-hover:opacity-100 transition-opacity
+                                   text-gray-600 hover:text-gray-300 disabled:opacity-30"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5" />
+                      </button>
+                    )}
                   </div>
                 </div>
               </motion.div>

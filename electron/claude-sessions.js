@@ -134,9 +134,14 @@ function list(projectDir) {
   // Titles are read only for the rows that will be shown — reading every
   // transcript to render forty of them is the difference between instant and
   // noticeable once this directory has a few hundred files in it.
+  const titles = readTitles();
   return rows.slice(0, MAX_SESSIONS).map((r) => ({
     ...r,
-    title: titleFrom(path.join(dir, `${r.id}.jsonl`)) || 'Untitled conversation',
+    // A title the user set wins over the derived one, and `renamed` lets the
+    // UI show which is which — otherwise clearing a rename looks broken,
+    // because a derived title appears where a set one was.
+    title: titles[r.id] || titleFrom(path.join(dir, `${r.id}.jsonl`)) || 'Untitled conversation',
+    renamed: Boolean(titles[r.id]),
   }));
 }
 
@@ -209,4 +214,174 @@ function read(projectDir, sessionId) {
   return { turns };
 }
 
-module.exports = { list, read, slugFor, sessionDir };
+/* ── titles and removal ───────────────────────────────────────────────────── */
+
+/**
+ * Titles the user has set, kept in this app's own store.
+ *
+ * The CLI transcripts carry no title field — the sidebar derives one from the
+ * first message — so a rename has nowhere to live in that format. Writing one
+ * in would mean editing another tool's data store, which this module
+ * deliberately does not do. A small file beside the app's other local state is
+ * the honest place for it.
+ */
+const TITLES_FILE = path.join(__dirname, '..', 'data', 'chat-titles.json');
+
+function readTitles() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(TITLES_FILE, 'utf8'));
+    return raw && typeof raw === 'object' ? raw : {};
+  } catch {
+    return {};
+  }
+}
+
+/** A uuid and nothing else — this value reaches the filesystem. */
+const VALID_ID = /^[0-9a-fA-F-]{8,64}$/;
+
+function assertId(sessionId) {
+  if (!VALID_ID.test(String(sessionId))) throw new Error('invalid session id');
+}
+
+/**
+ * Set or clear a title. An empty string clears it, restoring the derived one.
+ *
+ * Validated before touching anything, for the reason the read path had to be
+ * fixed: a guard placed after an early return is a guard that never runs.
+ */
+function rename(sessionId, title) {
+  assertId(sessionId);
+  const titles = readTitles();
+  const clean = String(title || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+  if (clean) titles[sessionId] = clean;
+  else delete titles[sessionId];
+
+  fs.mkdirSync(path.dirname(TITLES_FILE), { recursive: true });
+  fs.writeFileSync(TITLES_FILE, `${JSON.stringify(titles, null, 2)}\n`, 'utf8');
+  return { id: sessionId, title: clean || null };
+}
+
+/**
+ * Delete a conversation.
+ *
+ * This is the one place the module writes to the CLI's store, and it only ever
+ * unlinks a file whose name it has validated as a uuid and confirmed lives
+ * inside the resolved session directory. The realpath check is not paranoia
+ * about the regex — it is what makes the guarantee hold even if the id pattern
+ * is ever loosened.
+ */
+function remove(sessionId) {
+  assertId(sessionId);
+  const dir = sessionDir(path.join(__dirname, '..'));
+  if (!dir) return { removed: false, reason: 'no session directory' };
+
+  const file = path.join(dir, `${sessionId}.jsonl`);
+  const resolved = path.resolve(file);
+  if (!resolved.startsWith(path.resolve(dir) + path.sep)) {
+    throw new Error('refusing to delete outside the session directory');
+  }
+  if (!fs.existsSync(resolved)) return { removed: false, reason: 'not found' };
+
+  fs.unlinkSync(resolved);
+  // Drop any title with it, or a renamed-then-deleted conversation would leave
+  // an orphan entry that resurfaces if the CLI ever reuses the id.
+  const titles = readTitles();
+  if (titles[sessionId]) {
+    delete titles[sessionId];
+    fs.writeFileSync(TITLES_FILE, `${JSON.stringify(titles, null, 2)}\n`, 'utf8');
+  }
+  return { removed: true };
+}
+
+/* ── search ───────────────────────────────────────────────────────────────── */
+
+/** Enough hits to be useful, few enough to render. */
+const MAX_HITS = 40;
+
+/**
+ * Find a phrase across stored conversations.
+ *
+ * Searches the raw JSONL rather than parsing every entry: a parse of forty
+ * transcripts to answer a keystroke-driven query is far more work than a
+ * substring test, and a miss on the raw text cannot hide a hit in the parsed
+ * form. Only files that match are then parsed, to pull the surrounding line.
+ */
+function search(projectDir, query) {
+  const q = String(query || '').trim().toLowerCase();
+  if (q.length < 2) return [];
+
+  const dir = sessionDir(projectDir);
+  if (!dir) return [];
+
+  let files;
+  try {
+    files = fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl'));
+  } catch {
+    return [];
+  }
+
+  const hits = [];
+  const titles = readTitles();
+
+  for (const f of files) {
+    const full = path.join(dir, f);
+    let raw;
+    try {
+      if (fs.statSync(full).size > MAX_TITLE_BYTES) continue;
+      raw = fs.readFileSync(full, 'utf8');
+    } catch { continue; }
+
+    if (!raw.toLowerCase().includes(q)) continue;
+
+    const id = path.basename(f, '.jsonl');
+    let snippet = '';
+    let matches = 0;
+
+    for (const line of raw.split('\n')) {
+      if (!line.toLowerCase().includes(q)) continue;
+      let entry;
+      try { entry = JSON.parse(line); } catch { continue; }
+      const role = entry?.message?.role;
+      if (role !== 'user' && role !== 'assistant') continue;
+
+      const content = entry.message.content;
+      const text = typeof content === 'string'
+        ? content
+        : Array.isArray(content)
+          ? content.map((b) => (typeof b?.text === 'string' ? b.text : '')).join('')
+          : '';
+      const flat = text.replace(/\s+/g, ' ').trim();
+      const at = flat.toLowerCase().indexOf(q);
+      if (at < 0) continue;
+
+      matches += 1;
+      if (!snippet) {
+        // A window around the hit, so you can see why it matched.
+        const from = Math.max(0, at - 50);
+        snippet = (from ? '…' : '') + flat.slice(from, at + q.length + 90).trim();
+      }
+    }
+
+    // The phrase can appear only inside tool output or metadata, which matched
+    // the raw file but no message — reporting that as a conversation hit sends
+    // you to a transcript where you cannot find the word.
+    if (!matches) continue;
+
+    let updated = 0;
+    try { updated = fs.statSync(full).mtimeMs; } catch { /* gone mid-scan */ }
+    hits.push({
+      id,
+      title: titles[id] || titleFrom(full) || 'Untitled conversation',
+      snippet,
+      matches,
+      updated,
+    });
+  }
+
+  hits.sort((a, b) => b.updated - a.updated);
+  return hits.slice(0, MAX_HITS);
+}
+
+module.exports = {
+  list, read, rename, remove, search, slugFor, sessionDir, readTitles,
+};
