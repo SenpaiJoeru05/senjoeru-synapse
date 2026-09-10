@@ -451,6 +451,10 @@ export default function JoeruChat() {
           text: `**Claude Code could not answer.** ${why}\n\n`
             + 'Falling back to OpenCode — free tier, and it cannot edit files.\n\n'
             + `<sub>${raw}</sub>`,
+          // Timed like any other turn, and it matters most here: the CLI
+          // timeout is ten minutes, so "how long did that cost me before it
+          // gave up" is exactly what you want to see on a failure.
+          seconds: Math.round((Date.now() - started) / 1000),
         }])
       }
 
