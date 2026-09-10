@@ -29,6 +29,34 @@ const SUGGESTIONS = [
 ]
 
 /**
+ * Turn a CLI failure into something you can act on.
+ *
+ * The four causes have completely different fixes, and the raw message is the
+ * only thing that distinguishes them — so it is matched rather than swallowed,
+ * and kept alongside the explanation in case none of these patterns fit.
+ */
+function explainCliFailure(message: string): string {
+  const m = String(message || '')
+  if (/rate limit|429|quota|usage limit/i.test(m)) {
+    return 'Subscription quota or a rate limit — it should recover on its own shortly.'
+  }
+  // "Invalid API key · Please run /login" is the message the CLI actually
+  // gives on an expired login, and it contains none of the words below —
+  // matching only on 401/unauthorized sent the commonest auth failure to the
+  // unrecognised branch, where the advice is useless.
+  if (/not logged in|unauthor|401|403|credential|authenticate|invalid api key|\/login/i.test(m)) {
+    return 'Not authenticated. Run `claude` in a terminal once to log in.'
+  }
+  if (/agent .*not found|unknown agent|no such agent/i.test(m)) {
+    return 'That agent is not built here. Run `joeru-kit build` to write it into ~/.claude/agents.'
+  }
+  if (/ENOENT|not found|could not start/i.test(m)) {
+    return 'The Claude Code CLI is not on PATH for this process.'
+  }
+  return 'Unrecognised failure — the raw message is below.'
+}
+
+/**
  * The most useful identifying argument, whatever kind of tool this is.
  *
  * Reads both spellings on purpose: OpenCode sends `filePath`, the Claude Code
@@ -172,8 +200,32 @@ export default function JoeruChat() {
    * ever resume.
    */
   const cliSessionRef = useRef<string | null>(null)
-  /** Which runner answered the last turn, so the UI can say so. */
+  /** Which runner actually answered the last turn — null until one has. */
   const [runner, setRunner] = useState<'claude' | 'opencode' | null>(null)
+
+  /**
+   * Which runner the NEXT message will use, from capability detection.
+   *
+   * The indicator needs this as well as `runner`, because `runner` is only
+   * known after a turn finishes — so on a fresh chat there was nothing shown
+   * at all, and the question "am I on Claude or OpenCode right now?" had no
+   * answer until after you had already spent a turn finding out.
+   *
+   * Detection is reliable: the CLI path exists exactly when the preload bridge
+   * does, which is false in `npm run dev:web` and true in Electron. The one
+   * case where expectation and reality differ is the CLI failing mid-turn, and
+   * that corrects itself the moment the turn lands — and writes the reason
+   * into the transcript besides.
+   */
+  const expected: 'claude' | 'opencode' =
+    window.electronAPI?.claudeChat && window.electronAPI?.onClaudeChatEvent
+      ? 'claude' : 'opencode'
+
+  /** Confirmed if a turn has answered; otherwise what we expect to use. */
+  /** Why the CLI was not used, when it was tried and failed. */
+  const [fellBack, setFellBack] = useState<string | null>(null)
+
+  const shown = runner ?? expected
 
   // Default to Joeru himself. Sending no agent gets OpenCode's generic `build`
   // agent, which has no persona and no team — the chat would answer as a plain
@@ -227,6 +279,7 @@ export default function JoeruChat() {
       cliSessionRef.current = null
     }
     setRunner(null)
+    setFellBack(null)
     setTurns([])
     try {
       const { messages } = await api.joeruMessages(id)
@@ -259,6 +312,7 @@ export default function JoeruChat() {
       cliSessionRef.current = null
     }
     setRunner(null)
+    setFellBack(null)
     setTurns([])
     inputRef.current?.focus()
   }
@@ -372,13 +426,31 @@ export default function JoeruChat() {
           return
         }
 
-        // The CLI failed — quota, auth, a missing agent. Say so in the
-        // transcript rather than silently answering on a different model with
-        // a different persona, then carry on to OpenCode below.
+        /*
+         * The CLI failed. Say so in three places, because a silent downgrade
+         * is the failure that wastes your time: the answer that follows comes
+         * from a different model with different capabilities — OpenCode cannot
+         * write files at all — and it must not look like a normal reply.
+         *
+         * The raw CLI message is kept rather than summarised. "Claude Code
+         * could not answer" tells you nothing actionable; the actual text
+         * distinguishes a quota limit from an expired login from an agent that
+         * was never built, and those have completely different fixes.
+         */
+        // Held in a local so the narrowing survives the closure below — the
+        // setTurns callback runs later, where TypeScript can no longer prove
+        // result.error is set.
+        const raw = result.error ?? 'no reason reported'
+        const why = explainCliFailure(raw)
+
+        setRunner('opencode')
+        setFellBack(why)
         setTurns(t => [...t, {
           role: 'assistant',
           error: true,
-          text: `Claude Code could not answer (${result.error}). Falling back to OpenCode.`,
+          text: `**Claude Code could not answer.** ${why}\n\n`
+            + 'Falling back to OpenCode — free tier, and it cannot edit files.\n\n'
+            + `<sub>${raw}</sub>`,
         }])
       }
 
@@ -489,18 +561,27 @@ export default function JoeruChat() {
             it cannot write, with different capabilities. An answer that
             silently came from the backup should not look like one that did not.
           */}
-          {runner && (
-            <span
-              title={runner === 'claude'
-                ? "Claude Code CLI — the agent's own model tier, persistent session"
-                : 'OpenCode fallback — free tier, read-only tools'}
-              className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
-                runner === 'claude'
-                  ? 'bg-violet-500/15 text-violet-300'
-                  : 'bg-amber-500/15 text-amber-300'
-              }`}
-            >
-              {runner === 'claude' ? 'claude code' : 'opencode fallback'}
+          <span
+            title={shown === 'claude'
+              ? "Claude Code CLI — the agent's own model tier, persistent session, can edit files"
+              : fellBack
+                ? `Fell back to OpenCode: ${fellBack}`
+                : 'OpenCode — free tier, read-only tools. The Claude Code bridge is not available here.'}
+            className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
+              shown === 'claude'
+                ? 'bg-violet-500/15 text-violet-300'
+                : 'bg-amber-500/15 text-amber-300'
+            }`}
+          >
+            {shown === 'claude' ? 'claude code' : 'opencode'}
+            {/* An unconfirmed label is marked, so "claude code" before the
+                first answer cannot be mistaken for a runner that has actually
+                replied. */}
+            {!runner && <span className="opacity-50"> · expected</span>}
+          </span>
+          {fellBack && (
+            <span title={fellBack} className="text-[10px] text-amber-400/70">
+              claude unavailable
             </span>
           )}
           {loadingHistory && <Loader2 className="w-3 h-3 animate-spin text-gray-600" />}
