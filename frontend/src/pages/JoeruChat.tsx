@@ -55,6 +55,19 @@ function explainCliFailure(message: string): string {
   if (/not logged in|unauthor|401|403|credential|authenticate|invalid api key|\/login/i.test(m)) {
     return 'Not authenticated. Run `claude` in a terminal once to log in.'
   }
+  /*
+   * A safety net for a bug that is now fixed at the source.
+   *
+   * "Session ID <uuid> is already in use" meant a new session was started with
+   * an id the CLI already had a transcript for — chat() decided resume-or-not
+   * from an in-memory set that is empty on every app start, so opening a
+   * stored conversation and replying hit this every time. It now checks the
+   * filesystem instead. This branch stays because a message no pattern
+   * recognises is the one that wastes an evening.
+   */
+  if (/already in use/i.test(m)) {
+    return 'That conversation was started fresh instead of resumed. Reopen it from the list, or start a new chat.'
+  }
   if (/agent .*not found|unknown agent|no such agent/i.test(m)) {
     return 'That agent is not built here. Run `joeru-kit build` to write it into ~/.claude/agents.'
   }

@@ -321,6 +321,50 @@ const started = new Set();
 const inFlight = new Map();
 
 /**
+ * Does the CLI already hold a transcript for this session?
+ *
+ * Required lazily so this module keeps working if the sessions helper is ever
+ * moved or removed — a failure to answer degrades to "treat it as new", which
+ * is the same behaviour as before this check existed.
+ */
+function transcriptExists(sessionId) {
+  try {
+    // eslint-disable-next-line global-require
+    const sessions = require('./claude-sessions');
+    const dir = sessions.sessionDir(path.join(__dirname, '..'));
+    return Boolean(dir && fs.existsSync(path.join(dir, `${sessionId}.jsonl`)));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Strip terminal colour codes from a CLI message.
+ *
+ * The CLI writes its errors for a terminal, so the raw text arrives wrapped in
+ * escape sequences — the "already in use" error reached the UI as
+ * `[0m[31m[31mError: …[39m[0m`, which is both unreadable and stops the
+ * failure patterns from matching what they are looking for.
+ */
+function stripAnsi(text) {
+  /*
+   * The escape byte is OPTIONAL in this pattern, and that is the point.
+   *
+   * By the time a message has crossed a pipe and a JSON round trip the 0x1b
+   * can already be gone, leaving the bare "[0m[31m" that reached the UI in
+   * the reported failure. A pattern that requires the escape byte cleans the
+   * raw form and leaves the one you actually see.
+   *
+   * Spelled as a unicode escape rather than a literal control character: the
+   * first version of this line carried a real 0x1b byte in the source, which
+   * is invisible in an editor and made the pattern silently stricter than it
+   * appeared. cat -A was what revealed it.
+   */
+  // eslint-disable-next-line no-control-regex
+  return String(text || '').replace(/\u001b?\[[0-9;]*[A-Za-z]/g, '');
+}
+
+/**
  * Ask within a session. Resolves with the text, and reports tool use as it
  * happens through `onEvent`.
  *
@@ -337,7 +381,22 @@ function chat({ sessionId, agent, text }, onEvent = () => {}) {
   if (!q) return Promise.resolve({ text: '', tools: [] });
   if (!sessionId) return Promise.reject(new Error('a session id is required'));
 
-  const resuming = started.has(sessionId);
+  /*
+   * Resume when the transcript exists on disk — not when this process
+   * remembers creating it.
+   *
+   * The in-memory set was wrong and produced "Session ID <uuid> is already in
+   * use". It is empty on every app start, and opening a stored conversation
+   * from the sidebar sets the renderer's session id without the main process
+   * ever having seen it. So the next turn passed --session-id for a session
+   * the CLI already had, and the CLI rejected it.
+   *
+   * The filesystem is the only honest source for this: the CLI owns those
+   * files, they outlive both processes, and "does the transcript exist" is
+   * exactly the question --resume-or-not is asking. The set is kept only as a
+   * fast path for the session this process just created.
+   */
+  const resuming = started.has(sessionId) || transcriptExists(sessionId);
   const dirs = extraDirs();
 
   return new Promise((resolve, reject) => {
@@ -446,7 +505,10 @@ function chat({ sessionId, agent, text }, onEvent = () => {}) {
       inFlight.delete(sessionId);
       if (signal) { resolve({ text: answer.trim(), tools, cancelled: true }); return; }
       if (code !== 0) {
-        const detail = err.trim().split('\n').filter(Boolean).slice(-3).join(' ');
+        // Colour codes stripped before the message goes anywhere: they made
+        // the text unreadable in the UI and stopped the failure patterns from
+        // matching the words they look for.
+        const detail = stripAnsi(err).trim().split('\n').filter(Boolean).slice(-3).join(' ');
         reject(new Error(detail || `Claude Code exited ${code}`));
         return;
       }
