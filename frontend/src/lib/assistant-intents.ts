@@ -93,11 +93,62 @@ const RULES: [RegExp, Intent][] = [
   [/\b(status|updates?|progress|working on|going on|state)\b/i, 'status'],
 ]
 
+/**
+ * A local intent can only answer ONE short, factual question.
+ *
+ * The rules above test for a keyword anywhere in the string, which is fine for
+ * "what's the status" and catastrophic for anything longer. A 79-word message
+ * asking whether Assistant Mode's UI needed work — three questions, an aside
+ * about STT, and an instruction to leave it for now — was answered with the
+ * task board, because the word "status" appeared once in the middle of it.
+ *
+ * That is the same failure as the budget answer to "ok thanks", from the
+ * opposite end: routing decided by a word rather than by what was being asked.
+ * A keyword says what an utterance MENTIONS; these gates ask what it IS.
+ */
+const MAX_LOCAL_WORDS = 12
+
+/**
+ * Asking for a judgement, which no local lookup can supply.
+ *
+ * "Is it good already or what?" and "how about the UI and UX" want an opinion
+ * grounded in the code. The attention queue cannot produce one, and answering
+ * from it means confidently changing the subject.
+ *
+ * "should we" is deliberately absent — it belongs to the `next` rule, and
+ * putting it here would send "what should we do next" to the slow path, which
+ * is a working instant answer today.
+ */
+const JUDGEMENT = new RegExp(
+  '\\b(improve|improvements?|improving|better|worse|opinion|'
+  // "thoughts?" does not match "think" — the two most natural ways to ask for
+  // an opinion needed listing separately.
+  + 'thoughts?|think|thinks|thinking|'
+  + 'recommend|recommendation|suggest|suggestions?|advice|advise|'
+  + 'how about|what about|any good|good already|'
+  // "is it good" was too literal: "is the status good already or what" asks
+  // exactly the same thing and named its subject instead of pronouning it.
+  + 'is (it|this|that|the [a-z]+) good|worth (it|doing)|'
+  + 'ux|ui|design|refactor|rewrite|architecture)\\b',
+  'i',
+)
+
+/** More than one question in one breath — a single intent cannot serve both. */
+const questionCount = (s: string) => (String(s).match(/\?/g) || []).length
+
 export function classify(question: string): Intent {
   // Before the keyword rules, because this is decided by what the utterance is
   // ENTIRELY made of, and a rule that merely looks for words would let
   // "thanks, what's the status" be mistaken for a closing remark.
   if (isSmallTalk(question)) return 'chat'
+
+  // Also before the keyword rules, and for the same reason in reverse: these
+  // decide whether a local answer could POSSIBLY be the right shape, and a
+  // keyword found inside a paragraph is not evidence that it is.
+  if (words(question).length > MAX_LOCAL_WORDS) return 'ask'
+  if (questionCount(question) > 1) return 'ask'
+  if (JUDGEMENT.test(question)) return 'ask'
+
   for (const [re, intent] of RULES) if (re.test(question)) return intent
   return 'ask'
 }
@@ -244,12 +295,29 @@ async function answerStatus(): Promise<Answer> {
     ])} ${working[0].title}`
   } else if (working.length > 1) {
     headline = `${capitalise(plural(working.length, 'task'))} in progress`
-  } else if (!pending.length) {
-    // Nothing moving and nothing queued — here the completed count IS the news.
+  } else if (!pending.length && !needs) {
+    /*
+     * Nothing moving, nothing queued, nothing flagged — only here can the
+     * completed count be the news, and only here is "all clear" true.
+     *
+     * The `!needs` half was missing and produced a reply that contradicted
+     * itself in consecutive sentences: "Everything's done — sixteen tasks
+     * complete. One thing needs a look." Both halves were accurate; the board
+     * was clear and the attention queue was not. Saying "all clear" while
+     * something wants you is worse than either fact alone, because it tells
+     * you to stop looking.
+     */
     headline = vary('status.clear', [
       `Everything's done — ${plural(done.length, 'task')} complete`,
       `All clear, ${plural(done.length, 'task')} finished`,
       `Nothing outstanding — all ${plural(done.length, 'task')} complete`,
+    ])
+  } else if (!pending.length) {
+    // Board clear but the attention queue is not, so say only the first part
+    // and let the follow-up carry the rest.
+    headline = vary('status.doneButFlagged', [
+      `The board's clear — ${plural(done.length, 'task')} complete`,
+      `${capitalise(plural(done.length, 'task'))} complete, nothing in progress`,
     ])
   } else {
     headline = vary('status.idle', [
