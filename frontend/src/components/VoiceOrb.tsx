@@ -80,7 +80,24 @@ export default function VoiceOrb({ analyser, active, busy = false, size = 132 }:
       const { analyser: an, active: on, busy: thinking } = state.current
       const cx = size / 2
       const cy = size / 2
-      const base = size * 0.27
+      /*
+       * Sized so that EVERYTHING drawn fits inside the canvas.
+       *
+       * At 0.27 it did not, and the failure was not subtle once seen: the halo
+       * reaches r * 2.2, which on a 150px canvas is 178px, so the gradient was
+       * cut off by the canvas edge while still partly opaque. Because the
+       * corners sit further from the centre than the edges do (75 vs 106), the
+       * cut faded unevenly and read as a faint rounded rectangle around the
+       * orb — an invisible container with a highlighted border, which is
+       * exactly what it looked like. The outer ring overflowed too, but only
+       * at high volume, so it flickered rather than sitting there.
+       *
+       * 0.235 keeps the outer ring inside the box at full level:
+       *   base * 1.30 (peak swell) * 1.55 (outer ring) = 0.473 * size < size/2
+       * and the halo is clamped below so it reaches zero alpha exactly at the
+       * edge rather than being truncated.
+       */
+      const base = size * 0.235
 
       let target = 0
       let live = false
@@ -137,12 +154,16 @@ export default function VoiceOrb({ analyser, active, busy = false, size = 132 }:
       const r = base * (1 + level * 0.30)
 
       /* ── outer halo ─────────────────────────────────────────────────────── */
-      const glow = ctx.createRadialGradient(cx, cy, r * 0.5, cx, cy, r * 2.2)
+      // Clamped to the half-width so the gradient's transparent stop lands ON
+      // the canvas edge. Any larger and the fade is truncated while still
+      // visible, which is what drew a box around the orb.
+      const haloR = Math.min(r * 2.2, size / 2)
+      const glow = ctx.createRadialGradient(cx, cy, r * 0.5, cx, cy, haloR)
       glow.addColorStop(0, `rgba(${HALO},${0.16 + level * 0.26})`)
       glow.addColorStop(1, `rgba(${HALO},0)`)
       ctx.fillStyle = glow
       ctx.beginPath()
-      ctx.arc(cx, cy, r * 2.2, 0, Math.PI * 2)
+      ctx.arc(cx, cy, haloR, 0, Math.PI * 2)
       ctx.fill()
 
       /* ── HUD rings ──────────────────────────────────────────────────────── */
