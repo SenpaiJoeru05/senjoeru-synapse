@@ -20,9 +20,20 @@ import { useEffect, useState } from 'react'
 import { AlertTriangle, Coins, GitBranch, Loader2, Play, Clock } from 'lucide-react'
 import { api } from '@/lib/api'
 import { money, count, usePresentationMode } from '@/lib/presentation'
+import { formatBytes } from '@/lib/utils'
 
 /** Slow enough to be free, quick enough that a completed task shows up. */
 const POLL_MS = 15_000
+
+/**
+ * Host health on a quicker cadence than the metrics.
+ *
+ * CPU is a live figure and a dial that moves every fifteen seconds reads as
+ * broken. Measured cost of the endpoint on this machine: 19ms, because it
+ * walks the Claude directory to size it (369 files, 24.6MB) — cheap now, and
+ * worth re-checking if that directory grows by an order of magnitude.
+ */
+const HEALTH_MS = 5_000
 
 /** Below this the rail costs the conversation more room than it earns. */
 export const RAIL_MIN_WIDTH = 700
@@ -88,6 +99,65 @@ function Spark({ values, hidden: masked }: { values: number[]; hidden: boolean }
   )
 }
 
+/**
+ * A radial gauge — the HUD dial, as an SVG arc.
+ *
+ * `value` of null means "not measured yet" and draws only the track. That
+ * distinction matters: CPU utilisation is a rate, so the server has nothing to
+ * report until it has two samples, and drawing 0% would claim an idle machine
+ * while it was still measuring — a lie the widget could not detect.
+ */
+function Gauge({ value, label, size = 46 }: {
+  value: number | null; label: string; size?: number
+}) {
+  const stroke = 3.5
+  const r = (size - stroke) / 2
+  const c = 2 * Math.PI * r
+  // Three quarters of a turn, opening at the bottom, so it reads as a dial
+  // rather than a pie. Rotated so the gap is centred at the foot.
+  const sweep = 0.75
+  const pct = value === null ? 0 : Math.max(0, Math.min(100, value)) / 100
+  const tone = value === null ? 'rgba(255,255,255,0.25)'
+    : value > 85 ? 'rgb(248,113,113)'
+      : value > 65 ? 'rgb(252,211,77)'
+        : 'rgb(34,211,238)'
+
+  return (
+    <div className="flex flex-col items-center gap-0.5">
+      <div className="relative" style={{ width: size, height: size }}>
+        <svg width={size} height={size} className="-rotate-[225deg]">
+          <circle
+            cx={size / 2} cy={size / 2} r={r}
+            fill="none" stroke="rgba(255,255,255,0.08)" strokeWidth={stroke}
+            strokeDasharray={`${c * sweep} ${c}`} strokeLinecap="round"
+          />
+          <circle
+            cx={size / 2} cy={size / 2} r={r}
+            fill="none" stroke={tone} strokeWidth={stroke}
+            strokeDasharray={`${c * sweep * pct} ${c}`} strokeLinecap="round"
+            style={{ transition: 'stroke-dasharray 600ms ease-out, stroke 600ms linear' }}
+          />
+        </svg>
+        <span className="absolute inset-0 flex items-center justify-center font-mono text-[10px] tabular-nums text-gray-300">
+          {value === null ? '··' : Math.round(value)}
+        </span>
+      </div>
+      <span className="text-[8px] uppercase tracking-wider text-gray-600">{label}</span>
+    </div>
+  )
+}
+
+/** Seconds to something a person reads at a glance. */
+function uptimeLabel(seconds: number): string {
+  const s = Math.max(0, Math.floor(seconds))
+  const d = Math.floor(s / 86400)
+  const h = Math.floor((s % 86400) / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  if (d) return `${d}d ${h}h`
+  if (h) return `${h}h ${m}m`
+  return `${m}m`
+}
+
 function Tile({ icon: Icon, label, value, tone = 'normal' }: {
   icon: typeof Coins; label: string; value: string
   tone?: 'normal' | 'warn' | 'good'
@@ -112,6 +182,7 @@ export default function AssistantStats() {
   const presenting = usePresentationMode()
   const [snap, setSnap] = useState<Snapshot | null>(null)
   const [failed, setFailed] = useState(false)
+  const [health, setHealth] = useState<any | null>(null)
 
   useEffect(() => {
     let alive = true
@@ -151,6 +222,16 @@ export default function AssistantStats() {
 
     load()
     const t = setInterval(load, POLL_MS)
+    return () => { alive = false; clearInterval(t) }
+  }, [])
+
+  useEffect(() => {
+    let alive = true
+    const load = () => api.getSystemHealth()
+      .then((h) => { if (alive) setHealth(h) })
+      .catch(() => { if (alive) setHealth(null) })
+    load()
+    const t = setInterval(load, HEALTH_MS)
     return () => { alive = false; clearInterval(t) }
   }, [])
 
@@ -205,6 +286,43 @@ export default function AssistantStats() {
           {presenting ? 'tokens hidden' : `${count(snap.tokens)} tokens`}
         </div>
       </div>
+
+      {/*
+        Host health. Deliberately NOT masked by presentation mode — CPU and
+        memory are facts about a laptop, not about a business, and there is
+        nothing here anyone could learn from a recording.
+      */}
+      {health && (
+        <div className="glass rounded-xl px-2.5 py-2">
+          <div className="text-[9px] uppercase tracking-wider text-gray-500">System</div>
+          <div className="mt-1.5 flex items-start justify-around">
+            <Gauge value={health.cpu?.usagePercent ?? null} label="cpu" />
+            <Gauge value={Number(health.memory?.usagePercent ?? 0)} label="mem" />
+          </div>
+          <div className="mt-1.5 space-y-0.5 font-mono text-[9px] text-gray-600">
+            <div className="flex justify-between">
+              <span>up</span>
+              <span className="text-gray-500">{uptimeLabel(health.uptime ?? 0)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span>ram</span>
+              <span className="text-gray-500">
+                {formatBytes(health.memory?.used ?? 0)} / {formatBytes(health.memory?.total ?? 0)}
+              </span>
+            </div>
+            {health.claude?.exists && (
+              <div className="flex justify-between">
+                <span>.claude</span>
+                <span className="text-gray-500">{formatBytes(health.claude.size ?? 0)}</span>
+              </div>
+            )}
+            <div className="flex justify-between">
+              <span>cores</span>
+              <span className="text-gray-500">{health.cpu?.cores ?? '?'}</span>
+            </div>
+          </div>
+        </div>
+      )}
 
       {snap.topAttention && (
         <div className="glass rounded-xl px-2.5 py-2">

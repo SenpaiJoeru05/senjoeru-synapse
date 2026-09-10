@@ -342,6 +342,49 @@ function directorySize(dir) {
   return total;
 }
 
+/**
+ * CPU utilisation, sampled on a timer rather than per request.
+ *
+ * `os.loadavg()` is the obvious answer and is useless here: on Windows it
+ * always returns [0, 0, 0]. So this diffs the per-core time counters, which is
+ * the only way to get a real figure — utilisation is a RATE, and a single
+ * reading of monotonic counters cannot express one.
+ *
+ * On a timer and not inside getSystemHealthData because that function has two
+ * callers, the REST endpoint and the WebSocket push. Diffing "since the last
+ * call" would mean whichever fired first consumed the interval, and the other
+ * would measure a few milliseconds of it — which reads as wild swings between
+ * 0 and 100 for no reason the user could see.
+ */
+const CPU_SAMPLE_MS = 2000;
+let cpuPercent = null;
+let cpuPrev = null;
+
+function sampleCpu() {
+  const os = require('os');
+  const now = os.cpus().reduce((acc, c) => {
+    const t = c.times;
+    acc.idle += t.idle;
+    acc.total += t.user + t.nice + t.sys + t.idle + t.irq;
+    return acc;
+  }, { idle: 0, total: 0 });
+
+  if (cpuPrev) {
+    const dTotal = now.total - cpuPrev.total;
+    const dIdle = now.idle - cpuPrev.idle;
+    // A zero or negative delta means the counters did not advance (or wrapped).
+    // Keeping the previous value beats reporting a spike that never happened.
+    if (dTotal > 0) {
+      cpuPercent = Math.max(0, Math.min(100, ((dTotal - dIdle) / dTotal) * 100));
+    }
+  }
+  cpuPrev = now;
+}
+
+sampleCpu();
+// unref so this timer can never be the reason the process stays alive.
+setInterval(sampleCpu, CPU_SAMPLE_MS).unref();
+
 function getSystemHealthData() {
   const os = require('os');
   const cpus = os.cpus();
@@ -354,7 +397,14 @@ function getSystemHealthData() {
   let claudeSize = 0;
   try { if (fs.existsSync(CLAUDE_DIR)) claudeSize = directorySize(CLAUDE_DIR); } catch (_) {}
   return {
-    cpu: { cores: cpus.length, model: cpus[0]?.model || 'Unknown' },
+    cpu: {
+      cores: cpus.length,
+      model: cpus[0]?.model || 'Unknown',
+      // Null until two samples exist. Null is not zero, and a gauge that
+      // shows an idle machine while it is still measuring is a lie the
+      // consumer cannot detect — so the shape says "unknown" explicitly.
+      usagePercent: cpuPercent === null ? null : Number(cpuPercent.toFixed(1)),
+    },
     memory: {
       total: totalMemory, used: usedMemory, free: freeMemory,
       usagePercent: ((usedMemory / totalMemory) * 100).toFixed(2),
