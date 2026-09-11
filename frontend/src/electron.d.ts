@@ -100,7 +100,7 @@ export interface ElectronAPI {
    * parameter — the renderer must not be able to answer into a different
    * conversation than the one the reset button controls.
    */
-  claudeAsk?: (question: string) => Promise<string>
+  claudeAsk?: (prompt: string, question?: string) => Promise<string>
   claudeCancel?: () => Promise<boolean>
   /**
    * Start a fresh Assistant Mode conversation, without restarting the app.
@@ -130,9 +130,11 @@ export interface ElectronAPI {
   /**
    * A Chat-tab turn on the same CLI, in a persistent session.
    *
-   * Unlike claudeAsk this pins no model — the agent's declared tier applies —
-   * and the conversation lives in the CLI's own session store, so a follow-up
-   * costs a fraction of the first turn instead of re-sending the transcript.
+   * Joeru is pinned to the cheap model here as in the voice window — he is the
+   * dispatcher, not the implementer. A specialist picked from the dropdown
+   * keeps its OWN declared tier, which is how the roster puts the right brain
+   * on the right job. The conversation lives in the CLI's own session store,
+   * so a follow-up costs a fraction of the first turn.
    */
   claudeChat?: (args: { sessionId: string; agent?: string; text: string }) => Promise<{
     text: string
