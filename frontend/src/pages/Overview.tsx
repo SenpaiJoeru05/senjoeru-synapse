@@ -4,12 +4,14 @@ import { useNavigate } from 'react-router-dom'
 import StatCard from '@/components/StatCard'
 import NotificationBell from '@/components/NotificationBell'
 import { api } from '@/lib/api'
+import UsageLimits from '@/components/UsageLimits'
+import { usePresentationMode } from '@/lib/presentation'
 import { useRealtime, useTasks } from '@/lib/realtime'
 import { repoBadge } from '@/lib/repo-color'
 import { formatBytes, formatNumber } from '@/lib/utils'
 import {
-  Bot, ListTodo, Coins, Clock, Activity, Cpu, DollarSign,
-  TrendingUp, Zap, CheckCircle, ArrowRight, Eye, GitCommit,
+  Bot, ListTodo, Coins, Clock, Activity, Cpu,
+  Zap, CheckCircle, ArrowRight, Eye, GitCommit, AlertTriangle,
 } from 'lucide-react'
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from 'recharts'
 
@@ -106,43 +108,6 @@ function buildActivityFeed(metrics: any, tasks: any[]) {
   return events.sort((a, b) => b.ms - a.ms).slice(0, 16)
 }
 
-// ── UsageStat ────────────────────────────────────────────────────────────────
-
-function UsageStat({ label, value, icon: Icon, limit }: {
-  label: string; value: number; icon: React.ElementType; limit: number | null
-}) {
-  const pct = limit ? Math.min((value / limit) * 100, 100) : 0
-  const barColor  = pct >= 90 ? 'bg-error' : pct >= 70 ? 'bg-warning' : 'bg-gradient-primary'
-  const valueColor = pct >= 90 ? 'text-error' : pct >= 70 ? 'text-warning' : 'text-white'
-  return (
-    <div className="p-3 rounded-xl bg-surface2">
-      <div className="flex items-center justify-between mb-1.5">
-        <div className="flex items-center gap-2 text-sm text-gray-400">
-          <Icon className="w-3.5 h-3.5" />{label}
-        </div>
-        <div className="flex items-baseline gap-1">
-          <span className={`text-lg font-bold ${valueColor}`}>${value.toFixed(2)}</span>
-          {limit && <span className="text-xs text-gray-500">/ ${limit.toFixed(0)}</span>}
-        </div>
-      </div>
-      {limit ? (
-        <>
-          <div className="w-full bg-background rounded-full h-1.5 mb-1">
-            <motion.div
-              initial={{ width: 0 }}
-              animate={{ width: `${pct}%` }}
-              transition={{ duration: 0.5, ease: 'easeOut' }}
-              className={`h-1.5 rounded-full ${barColor}`}
-            />
-          </div>
-          <p className="text-[11px] text-gray-600">{pct.toFixed(1)}% of your set limit</p>
-        </>
-      ) : (
-        <p className="text-[11px] text-gray-600">Set a limit in Settings to see % usage</p>
-      )}
-    </div>
-  )
-}
 
 // ── ActivityIcon ─────────────────────────────────────────────────────────────
 
@@ -175,6 +140,8 @@ function ActivityIcon({ event }: { event: any }) {
 // ── Overview ─────────────────────────────────────────────────────────────────
 
 export default function Overview() {
+  // Subscribe so a presentation-mode change re-renders the figures below.
+  usePresentationMode()
   const navigate = useNavigate()
   // Live metrics + host health arrive over the shared WebSocket — no polling.
   const { metrics, health, ready } = useRealtime() as {
@@ -185,10 +152,33 @@ export default function Overview() {
   const allTasks: any[] = useTasks()
   // Settings change rarely and aren't pushed — one REST read is enough.
   const [settings, setSettings] = useState<any | null>(null)
+  /*
+   * The attention queue. Not pushed over the socket like the metrics, and
+   * cheap to ask for — the service computes it on read from data already in
+   * SQLite, measured at 19ms on this machine.
+   */
+  const [attention, setAttention] = useState<any | null>(null)
   const loading = !ready && !metrics
 
   useEffect(() => {
     api.getSettings().then(setSettings).catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    let alive = true
+    const load = () => {
+      api.getAttention()
+        .then((d) => { if (alive) setAttention(d) })
+        .catch(() => {})
+    }
+    load()
+    /*
+     * Re-read on the same cadence the rail uses. A queue that only refreshed
+     * on a full page load would show a cleared item as still needing action,
+     * which is the one way this card could be actively misleading.
+     */
+    const t = setInterval(load, 15_000)
+    return () => { alive = false; clearInterval(t) }
   }, [])
 
   if (loading) {
@@ -208,13 +198,6 @@ export default function Overview() {
     const h = new Date().getHours()
     return h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening'
   }
-
-  const costs        = metrics?.costs
-  const hourlyBudget = settings?.hourlyBudget ?? 5
-  const weeklyBudget = settings?.weeklyBudget ?? 50
-  const thisHour     = costs?.thisHour ?? 0
-  const thisWeek     = costs?.weekly ?? 0
-  const today        = costs?.today ?? 0
 
   // Sort: Working → Reviewing → Pending → Completed → Failed, then most recent first
   const sortedTasks = [...allTasks].sort((a, b) => {
@@ -314,11 +297,27 @@ export default function Overview() {
           icon={Coins} delay={0.1} showMiniChart
           miniChart={metrics?.tokens?.daily?.slice(-7).map((d: any) => d.tokens) ?? []}
         />
+        {/*
+          The attention queue, which was missing from this page entirely.
+
+          The cost card used to sit here. Replacing it with a second token
+          figure — which is what I did first — put "Tokens Today" and "Tokens
+          This Week" side by side drawing the IDENTICAL seven-day sparkline,
+          so the slot cost a card and added nothing.
+
+          This is the number worth the space: the "what needs YOU right now"
+          queue is the one thing on the dashboard that asks for an action, it
+          is computed zero-token from data already loaded, and until now it
+          only appeared in Assistant Mode's rail.
+        */}
         <StatCard
-          title="Cost Today"
-          value={today > 0 ? `$${today.toFixed(2)}` : '$0.00'}
-          icon={DollarSign} delay={0.15} showMiniChart
-          miniChart={metrics?.tokens?.daily?.slice(-7).map((d: any) => d.cost) ?? []}
+          title="Needs Attention"
+          value={String(attention?.counts?.total ?? 0)}
+          icon={AlertTriangle} delay={0.15}
+          // Short by necessity — `trend` renders beside the icon, so a full
+          // item title would overrun it. The titles are on /tasks.
+          trend={attention?.counts?.high ? `${attention.counts.high} high` : undefined}
+          trendUp={false}
         />
       </div>
 
@@ -486,19 +485,22 @@ export default function Overview() {
 
       {/* ── Token Usage + System Health ── */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
+        {/*
+          The real plan windows, in place of the dollar budget that used to be
+          here. That card compared a notional API-equivalent price against a
+          ceiling Joel picked; this one shows the limit the subscription
+          actually enforces, as reported by the server on every response.
+        */}
         <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.4 }}
           className="glass-card !p-5">
           <h2 className="text-base font-bold mb-4 flex items-center gap-2">
-            <DollarSign className="w-5 h-5 text-warning" />Token Usage Cost
+            <Activity className="w-5 h-5 text-primary" />Claude Plan Limits
           </h2>
-          <div className="space-y-4">
-            <UsageStat label="This Hour" value={thisHour} icon={Zap}       limit={hourlyBudget > 0 ? hourlyBudget : null} />
-            <UsageStat label="This Week" value={thisWeek} icon={TrendingUp} limit={weeklyBudget > 0 ? weeklyBudget : null} />
-            <p className="text-xs text-gray-600 pt-1">
-              Computed from JSONL files · Sonnet 4.6 pricing
-              {hourlyBudget > 0 && <span> · Limits set in Settings</span>}
-            </p>
-          </div>
+          <UsageLimits />
+          <p className="text-xs text-gray-600 pt-3">
+            Reported by the API on each response · updates when Chat or
+            Assistant Mode answers
+          </p>
         </motion.div>
 
         <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.45 }}

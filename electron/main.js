@@ -1,7 +1,25 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
+const {
+  app, BrowserWindow, ipcMain, globalShortcut, screen,
+} = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
+const { randomUUID } = require('crypto');
+const windowState = require('./assistant-window-state');
 const isDev = !app.isPackaged;
+
+/**
+ * Hotkey to summon the Assistant window from anywhere.
+ *
+ * A global shortcut rather than a wake word, which is the trade this project
+ * already reasoned through: always-on listening needs Porcupine or equivalent,
+ * and a keypress delivers most of the benefit for none of the cost — no model,
+ * no permanently open microphone, and no false triggers from a meeting.
+ *
+ * Ctrl+Alt+J is chosen for being unclaimed. Ctrl+Shift+J would have been the
+ * obvious mnemonic and is DevTools in every Chromium app, including this one;
+ * registering it globally would take it away everywhere.
+ */
+const HOTKEY = process.env.SYNAPSE_ASSISTANT_HOTKEY || 'Control+Alt+J';
 
 let mainWindow;
 let assistantWindow = null;
@@ -87,10 +105,11 @@ function openAssistantWindow() {
   }
 
   assistantWindow = new BrowserWindow({
-    width: 440,
-    height: 560,
-    minWidth: 360,
-    minHeight: 420,
+    // Reopened where it was last left, when that is still a place a display
+    // can show. See assistant-window-state.js.
+    ...windowState.initialBounds(screen),
+    minWidth: windowState.MIN.width,
+    minHeight: windowState.MIN.height,
     // frame:false needs the renderer to supply its own drag region and close
     // button — see Assistant.tsx.
     frame: false,
@@ -129,9 +148,60 @@ function openAssistantWindow() {
     if (level >= 3) console.error(`[assistant:console] ${message}`);
   });
 
+  windowState.track(assistantWindow);
+
   assistantWindow.on('closed', () => {
     assistantWindow = null;
   });
+}
+
+/**
+ * What the hotkey does — summon, or dismiss if it is already in front.
+ *
+ * A toggle rather than a plain show, because the window is alwaysOnTop: with
+ * show-only, the key that conjures it gives you no way to put it away again
+ * without reaching for the mouse, which defeats the point of a hotkey.
+ *
+ * Hidden rather than closed, so the conversation so far survives. Closing
+ * destroys the renderer and with it the history that makes "mark that one
+ * complete" mean anything.
+ */
+function toggleAssistantWindow() {
+  if (assistantWindow && !assistantWindow.isDestroyed()) {
+    if (assistantWindow.isVisible() && assistantWindow.isFocused()) {
+      assistantWindow.hide();
+      return;
+    }
+    assistantWindow.show();
+    assistantWindow.focus();
+    return;
+  }
+  openAssistantWindow();
+}
+
+/**
+ * Register the hotkey, and say so either way.
+ *
+ * `register` returns false when another application already owns the
+ * combination, and it does so silently — without this line the key would
+ * simply do nothing and look like a bug in this app rather than a collision.
+ */
+function registerHotkey() {
+  let ok = false;
+  try {
+    ok = globalShortcut.register(HOTKEY, toggleAssistantWindow);
+  } catch (err) {
+    console.error(`[main] hotkey ${HOTKEY} is not a valid accelerator: ${err.message}`);
+    return;
+  }
+  if (ok) {
+    console.log(`[main] Assistant hotkey: ${HOTKEY}`);
+  } else {
+    console.error(
+      `[main] hotkey ${HOTKEY} is already taken by another application. `
+      + 'Set SYNAPSE_ASSISTANT_HOTKEY to something else.',
+    );
+  }
 }
 
 app.whenReady().then(() => {
@@ -143,6 +213,7 @@ app.whenReady().then(() => {
     startCollector();
   }
   createWindow();
+  registerHotkey();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -170,6 +241,32 @@ const tts = require('./tts');
 const stt = require('./stt');
 const whisper = require('./whisper');
 const claude = require('./claude');
+const claudeSessions = require('./claude-sessions');
+const claudeUsage = require('../shared/usage-store');
+const assistantSessions = require('./assistant-sessions');
+const { createTracker } = require('../shared/assistant-session');
+
+/*
+ * Release the voice subprocesses on the way out.
+ *
+ * `window-all-closed` above cannot do this — it is registered before these
+ * requires — and neither process is a child that dies with the window: the
+ * parked Piper holds a 60MB model resident, and whisper-stream holds the
+ * MICROPHONE, which is the one that matters. Leaving it running means the mic
+ * indicator stays on after the app is gone.
+ */
+app.on('before-quit', () => {
+  // A global shortcut outlives the window but not the process; unregistering
+  // is still right so a crash-and-restart cycle cannot leave a stale claim.
+  try { globalShortcut.unregisterAll(); } catch { /* quitting anyway */ }
+  // The bounds writer is debounced, so a move immediately before quitting
+  // would otherwise never reach disk.
+  try { windowState.flush(assistantWindow); } catch { /* quitting anyway */ }
+  try { tts.shutdown(); } catch { /* quitting anyway */ }
+  try { whisper.cancelListen(); } catch { /* quitting anyway */ }
+  try { whisper.cancel(); } catch { /* quitting anyway */ }
+  try { stt.cancel(); } catch { /* quitting anyway */ }
+});
 
 // Breadcrumbs for a renderer that dies without a stack. A crashed renderer
 // takes its console with it, but an IPC message already received by the main
@@ -188,11 +285,65 @@ ipcMain.handle('voice-info', async () => ({
   claude: claude.describe(),
 }));
 
-// Assistant Mode's answering brain. One question per invocation, triggered by
-// the user — the same thing as typing `claude -p` in a terminal.
-ipcMain.handle('claude-ask', async (_e, question) => claude.ask(question));
+/**
+ * Which conversation Assistant Mode is in.
+ *
+ * One session for the life of the app run, so Joeru remembers what was said
+ * two questions ago instead of meeting you fresh each time. Held in memory on
+ * purpose: quitting is the natural "start again", and restoring last week's
+ * conversation would carry context nobody remembers having.
+ *
+ * See shared/assistant-session.js for the measurements — history was ~500
+ * tokens against ~44,000 of fixed context re-paid per question, so this costs
+ * less than the one-shot it replaces rather than more.
+ */
+const assistantSession = createTracker({ uuid: randomUUID });
 
-ipcMain.handle('claude-cancel', async () => { claude.cancel(); return true; });
+/**
+ * Give the session a name a person would recognise.
+ *
+ * Its first user message is the grounding preamble, so the derived title would
+ * read "You are answering one turn of a spoken conversation" — which is what
+ * cluttered Chat's sidebar in the first place. Now that these sessions are
+ * real conversations worth resuming, they need a real title.
+ *
+ * Best effort: a failure here costs a nice name, and must never stop an answer.
+ */
+function nameAssistantSession(id) {
+  try {
+    const when = new Date().toLocaleString(undefined, {
+      month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+    });
+    claudeSessions.rename(id, `Assistant Mode — ${when}`);
+  } catch {
+    // Unnamed is fine; unanswered is not.
+  }
+}
+
+// Assistant Mode's answering brain. Triggered by the user — the same thing as
+// typing `claude -p` in a terminal, continuing one session.
+ipcMain.handle('claude-ask', async (event, question) => {
+  /*
+   * Tool activity is pushed while the answer is being worked out.
+   *
+   * Assistant Mode had no idea what was happening during a thirteen-second
+   * wait while Chat named every file it touched. An invoke resolves exactly
+   * once, so progress has to arrive on its own channel.
+   */
+  const send = (payload) => {
+    // The window can close mid-answer; a destroyed webContents throws.
+    if (!event.sender.isDestroyed()) event.sender.send('claude-ask-event', payload);
+  };
+
+  // Named on the turn that creates it, not on every turn — renaming on each
+  // question would keep overwriting a title the user may have set themselves.
+  const fresh = !assistantSession.started();
+  const sessionId = assistantSession.current();
+
+  const answer = await claude.ask(question, send, sessionId);
+  if (fresh) nameAssistantSession(sessionId);
+  return answer;
+});
 
 // What gets asked, and which brain answered. A question that keeps falling
 // through to the ~13s fallback is a candidate for being made instant, and this
@@ -252,8 +403,144 @@ ipcMain.handle('listen-stop', async () => {
 
 ipcMain.handle('listen-cancel', async () => { whisper.cancelListen(); return true; });
 
+/**
+ * A Chat-tab turn on the Claude Code CLI.
+ *
+ * Tool activity is pushed on a separate channel rather than returned with the
+ * answer: `invoke` resolves once, and the point of streaming is that you see
+ * the Read and the Edit while they happen instead of after. The renderer
+ * correlates events by sessionId, so two Chat windows cannot cross wires.
+ */
+ipcMain.handle('claude-chat', async (event, { sessionId, agent, text }) => {
+  const send = (payload) => {
+    // The window can close mid-turn; a destroyed webContents throws on send.
+    if (!event.sender.isDestroyed()) {
+      event.sender.send('claude-chat-event', { sessionId, ...payload });
+    }
+  };
+  try {
+    return await claude.chat({ sessionId, agent, text }, send);
+  } catch (err) {
+    // Rejecting an invoke loses the message shape the renderer needs to fall
+    // back cleanly, so failure is data rather than an exception.
+    return { text: '', tools: [], error: err.message };
+  }
+});
+
+/**
+ * The CLI's own conversation store, read-only.
+ *
+ * Rooted at the repo rather than a caller-supplied path, so the renderer
+ * cannot ask for another project's transcripts.
+ */
+const PROJECT_DIR = path.join(__dirname, '..');
+
+ipcMain.handle('claude-sessions', async () => claudeSessions.list(PROJECT_DIR, assistantSessions.ids()));
+
+ipcMain.handle('claude-session-read', async (_e, id) => {
+  try {
+    return claudeSessions.read(PROJECT_DIR, id);
+  } catch (err) {
+    return { turns: [], error: err.message };
+  }
+});
+
+ipcMain.handle('claude-session-rename', async (_e, { id, title }) => {
+  try {
+    return claudeSessions.rename(id, title);
+  } catch (err) {
+    return { error: err.message };
+  }
+});
+
+/**
+ * Delete a conversation. The only write this app makes to the CLI store, and
+ * it unlinks one validated uuid inside the resolved session directory.
+ */
+ipcMain.handle('claude-session-delete', async (_e, id) => {
+  try {
+    return claudeSessions.remove(id);
+  } catch (err) {
+    return { removed: false, error: err.message };
+  }
+});
+
+ipcMain.handle('claude-session-search', async (_e, query) => {
+  try {
+    return claudeSessions.search(PROJECT_DIR, query, assistantSessions.ids());
+  } catch {
+    return [];
+  }
+});
+
+ipcMain.handle('claude-chat-cancel', async (_e, sessionId) => claude.cancelChat(sessionId));
+
+ipcMain.handle('claude-chat-forget', async (_e, sessionId) => {
+  claude.forget(sessionId);
+  return true;
+});
+
+/*
+ * Real plan usage — the 5-hour session window and the 7-day weekly window.
+ *
+ * Read only, and never triggers a call of its own: the figures are recorded as
+ * a side effect of answers Chat and Assistant Mode were already producing. So
+ * asking for usage costs nothing, and the honest consequence is that it can be
+ * stale — which is why the age comes back with it rather than being hidden.
+ */
+/*
+ * Start a fresh Assistant Mode conversation without quitting the app.
+ *
+ * Needed because "it resets when you restart" is no bound at all on a window
+ * that stays open for days: each turn adds context, so a long session gets
+ * steadily heavier, and a misheard command can leave the conversation
+ * confused in a way only a clean slate fixes.
+ *
+ * Returns the new session id and the one it replaced, so the UI can say what
+ * happened rather than silently forgetting.
+ */
+ipcMain.handle('assistant-new-conversation', async () => {
+  const { id, previous } = assistantSession.reset();
+  return { id, previous };
+});
+
+/** Which conversation Assistant Mode is in, for the UI to show and link to. */
+ipcMain.handle('assistant-session', async () => ({
+  id: assistantSession.started() ? assistantSession.current() : null,
+}));
+
+ipcMain.handle('claude-usage', async () => claudeUsage.read());
+
+/*
+ * Push a new reading to every open window the moment it is recorded.
+ *
+ * Broadcast rather than replying to the window that asked, because the reading
+ * is account-wide: an answer in Assistant Mode moves the same bars the
+ * Overview page is showing, and only pushing to the asker would leave the
+ * dashboard a minute stale for no reason.
+ *
+ * Subscribed once at module scope — inside the IPC handler it would add a
+ * listener per call.
+ */
+claudeUsage.subscribe((snapshot) => {
+  const payload = { usage: snapshot, stale: false, ageMs: 0 };
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (win.isDestroyed()) continue;
+    try {
+      win.webContents.send('claude-usage-update', payload);
+    } catch {
+      // A window torn down mid-broadcast is not an error worth surfacing.
+    }
+  }
+});
+
 ipcMain.handle('open-assistant', async () => {
   openAssistantWindow();
+  // Park a Piper process now. It loads a 60MB model at startup, and paying
+  // that on the first answer was ~800ms of silence before Joeru spoke. Done
+  // here rather than at app start so someone who never opens this window never
+  // carries the process.
+  tts.warm();
   return true;
 });
 

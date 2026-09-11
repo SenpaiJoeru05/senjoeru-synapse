@@ -342,6 +342,49 @@ function directorySize(dir) {
   return total;
 }
 
+/**
+ * CPU utilisation, sampled on a timer rather than per request.
+ *
+ * `os.loadavg()` is the obvious answer and is useless here: on Windows it
+ * always returns [0, 0, 0]. So this diffs the per-core time counters, which is
+ * the only way to get a real figure — utilisation is a RATE, and a single
+ * reading of monotonic counters cannot express one.
+ *
+ * On a timer and not inside getSystemHealthData because that function has two
+ * callers, the REST endpoint and the WebSocket push. Diffing "since the last
+ * call" would mean whichever fired first consumed the interval, and the other
+ * would measure a few milliseconds of it — which reads as wild swings between
+ * 0 and 100 for no reason the user could see.
+ */
+const CPU_SAMPLE_MS = 2000;
+let cpuPercent = null;
+let cpuPrev = null;
+
+function sampleCpu() {
+  const os = require('os');
+  const now = os.cpus().reduce((acc, c) => {
+    const t = c.times;
+    acc.idle += t.idle;
+    acc.total += t.user + t.nice + t.sys + t.idle + t.irq;
+    return acc;
+  }, { idle: 0, total: 0 });
+
+  if (cpuPrev) {
+    const dTotal = now.total - cpuPrev.total;
+    const dIdle = now.idle - cpuPrev.idle;
+    // A zero or negative delta means the counters did not advance (or wrapped).
+    // Keeping the previous value beats reporting a spike that never happened.
+    if (dTotal > 0) {
+      cpuPercent = Math.max(0, Math.min(100, ((dTotal - dIdle) / dTotal) * 100));
+    }
+  }
+  cpuPrev = now;
+}
+
+sampleCpu();
+// unref so this timer can never be the reason the process stays alive.
+setInterval(sampleCpu, CPU_SAMPLE_MS).unref();
+
 function getSystemHealthData() {
   const os = require('os');
   const cpus = os.cpus();
@@ -354,7 +397,14 @@ function getSystemHealthData() {
   let claudeSize = 0;
   try { if (fs.existsSync(CLAUDE_DIR)) claudeSize = directorySize(CLAUDE_DIR); } catch (_) {}
   return {
-    cpu: { cores: cpus.length, model: cpus[0]?.model || 'Unknown' },
+    cpu: {
+      cores: cpus.length,
+      model: cpus[0]?.model || 'Unknown',
+      // Null until two samples exist. Null is not zero, and a gauge that
+      // shows an idle machine while it is still measuring is a lie the
+      // consumer cannot detect — so the shape says "unknown" explicitly.
+      usagePercent: cpuPercent === null ? null : Number(cpuPercent.toFixed(1)),
+    },
     memory: {
       total: totalMemory, used: usedMemory, free: freeMemory,
       usagePercent: ((usedMemory / totalMemory) * 100).toFixed(2),
@@ -370,6 +420,40 @@ app.get('/api/metrics', async (req, res) => {
     res.json(await readAllMetrics());
   } catch (error) {
     res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * Change one task's status on the authoritative board.
+ *
+ * Not `POST /api/metrics/tasks`, which looks like the write path and is not:
+ * that writes `metrics/tasks.json`, a file the collector REGENERATES from
+ * `paths.tasksFile` on every poll, so a write there survives until the next
+ * tick and then vanishes. This writes the real board.
+ *
+ * Narrow on purpose — status only, on a task that already exists. Creating,
+ * deleting and editing text stay with the agents; see shared/tasks-write.js
+ * for why the ownership rule changed this far and no further.
+ */
+app.post('/api/tasks/:id/status', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body || {};
+    if (!status) return res.status(400).json({ error: 'status is required' });
+
+    const file = getWorkspaceConfig()?.paths?.tasksFile;
+    if (!file || !fs.existsSync(file)) {
+      return res.status(404).json({ error: `task board not found at ${file || '(unset)'}` });
+    }
+
+    const { setTaskStatus } = require('../shared/tasks-write');
+    const { task, previous } = setTaskStatus(file, id, status);
+    return res.json({ success: true, task, previous });
+  } catch (error) {
+    // A bad status or unknown id is the caller's mistake, not a server fault,
+    // and the difference matters to a UI deciding whether to offer a retry.
+    const clientError = /^(no task with id|unknown status|task board has no)/.test(error.message);
+    return res.status(clientError ? 400 : 500).json({ error: error.message });
   }
 });
 
@@ -427,6 +511,27 @@ app.get('/api/claude/info', async (req, res) => {
 app.get('/api/system/health', async (req, res) => {
   try {
     res.json(getSystemHealthData());
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/*
+ * Real plan usage — the 5-hour and 7-day windows the subscription actually
+ * enforces, not the self-set dollar budget on the Overview page.
+ *
+ * This only ever reads the file Electron writes; the backend makes no Claude
+ * call of its own and must not, or "check my usage" would start costing quota.
+ * `usage: null` therefore means "not observed yet" and has to render as
+ * unknown — reporting it as 0% used would be the same class of lie the
+ * attention-queue grounding fix was about.
+ */
+app.get('/api/usage', async (req, res) => {
+  try {
+    // The store re-reads when the file's mtime changes, which is what lets
+    // this process see readings that Electron recorded. See usage-store.js.
+    const { read } = require('../shared/usage-store');
+    res.json(read());
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

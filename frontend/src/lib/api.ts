@@ -39,6 +39,18 @@ export const api = {
     return response.data
   },
 
+  /**
+   * Change one task's status on the authoritative board.
+   *
+   * Note this is NOT updateMetric('tasks', …). That writes metrics/tasks.json,
+   * which the collector regenerates from the real board on every poll — so a
+   * write there appears to work and is gone within seconds.
+   */
+  async setTaskStatus(id: string, status: string): Promise<any> {
+    const response = await axios.post(`${API_BASE_URL}/tasks/${encodeURIComponent(id)}/status`, { status })
+    return response.data
+  },
+
   async getSettings(): Promise<any> {
     const response = await axios.get(`${API_BASE_URL}/settings`)
     return response.data
@@ -131,6 +143,16 @@ export const api = {
   // Memory is local markdown in joeru-kit — read/write, but spends no tokens.
   async joeruMemory(): Promise<any> {
     return (await axios.get(`${API_BASE_URL}/joeru/memory`)).data
+  },
+  /**
+   * Real plan usage (5-hour + weekly windows), for the browser build.
+   *
+   * Under Electron prefer `window.electronAPI.claudeUsage()` — it reads the
+   * same snapshot without a round trip. Both return `usage: null` when nothing
+   * has been observed yet, which is not zero usage.
+   */
+  async usage(): Promise<any> {
+    return (await axios.get(`${API_BASE_URL}/usage`)).data
   },
   async joeruSaveMemory(folder: string, slug: string, data: { description?: string; body: string }): Promise<any> {
     return (await axios.put(`${API_BASE_URL}/joeru/memory/${folder}/${encodeURIComponent(slug)}`, data)).data

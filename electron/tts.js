@@ -135,6 +135,11 @@ function setVoice(id) {
   if (!fs.existsSync(voicePath(id))) throw new Error(`voice not downloaded: ${VOICES[id].file}`);
   cancel();
   currentVoiceId = id;
+  // The parked process has the OLD model loaded, which is the whole point of
+  // it — so it is worthless now. Re-park on the new voice so the first answer
+  // after a switch is as quick as the rest.
+  dropStandby();
+  warm();
   return currentVoiceId;
 }
 
@@ -152,6 +157,93 @@ function describe() {
 }
 
 /**
+ * A Piper process spawned in advance, model already loaded, waiting on stdin.
+ *
+ * Piper loads its 60MB ONNX model at startup, BEFORE it reads a word of input,
+ * and that load was being paid on every single answer. Measured, feeding the
+ * same sentence to a process that was already up:
+ *
+ *   spawn and feed immediately   1260ms   (what this used to do)
+ *   spawn, idle 1s, then feed     405ms
+ *   spawn, idle 3s, then feed     500ms
+ *
+ * So roughly 800ms of the delay before Joeru started speaking was model load,
+ * not synthesis. Keeping one process parked on stdin removes it.
+ *
+ * Deliberately a standby rather than one long-lived process serving every
+ * request: with `--output_file` a process handles one utterance and exits,
+ * which keeps the existing protocol exactly as it was — a complete WAV, whose
+ * header carries the sample rate. A resident multi-request process would have
+ * to stream raw PCM, and then the renderer needs the rate out of band and has
+ * to schedule chunks itself. The renderer's audio path has already crashed
+ * Chromium three times; this buys most of the win without going back in there.
+ */
+let standby = null;
+
+function spawnPiper(outFile) {
+  const v = VOICES[currentVoiceId];
+  return spawn(EXE, [
+    '--model', voicePath(currentVoiceId),
+    '--output_file', outFile,
+    '--length_scale', String(v.lengthScale),
+    '--noise_scale', String(v.noiseScale),
+    '--noise_w', String(v.noiseW),
+  ], {
+    cwd: path.join(ROOT, 'piper'),   // espeak-ng-data is resolved relative to cwd
+    windowsHide: true,
+  });
+}
+
+const tempWav = () =>
+  path.join(os.tmpdir(), `synapse-tts-${crypto.randomBytes(6).toString('hex')}.wav`);
+
+/**
+ * Park a process so the next answer does not pay for the model load.
+ *
+ * Safe to call repeatedly. Called when the Assistant window opens rather than
+ * at app start, so someone who never uses voice never carries the process.
+ */
+function warm() {
+  if (standby || !available()) return false;
+
+  const out = tempWav();
+  let proc;
+  try {
+    proc = spawnPiper(out);
+  } catch {
+    return false;   // warming is an optimisation; never let it throw
+  }
+
+  const entry = {
+    proc, out, voiceId: currentVoiceId, stderr: '', dead: false,
+  };
+  proc.stderr.on('data', (d) => { entry.stderr += d.toString(); });
+  proc.stdin.on('error', () => {});
+  // A standby that dies before use must not be handed out as if it were live.
+  proc.on('error', () => { entry.dead = true; if (standby === entry) standby = null; });
+  proc.on('close', () => {
+    entry.dead = true;
+    if (standby === entry) {
+      standby = null;
+      // It exited without ever being given text, so its file is unused.
+      fs.promises.unlink(out).catch(() => {});
+    }
+  });
+
+  standby = entry;
+  return true;
+}
+
+/** Discard the parked process — on quit, or when it is for the wrong voice. */
+function dropStandby() {
+  const s = standby;
+  standby = null;
+  if (!s) return;
+  try { if (!s.proc.killed) s.proc.kill(); } catch { /* already gone */ }
+  fs.promises.unlink(s.out).catch(() => {});
+}
+
+/**
  * Synthesize to a WAV buffer.
  *
  * Writes to a temp file rather than streaming raw PCM over stdout: the WAV
@@ -165,45 +257,68 @@ function speak(text) {
   if (!clean) return Promise.resolve(null);
   if (!available()) return Promise.reject(new Error(describe().reason));
 
-  const out = path.join(os.tmpdir(), `synapse-tts-${crypto.randomBytes(6).toString('hex')}.wav`);
-  const v = VOICES[currentVoiceId];
+  // Take the parked process when it is usable, otherwise start one now. A
+  // standby for a different voice is useless — the model is already loaded.
+  let handoff = null;
+  if (standby && !standby.dead && standby.voiceId === currentVoiceId) {
+    handoff = standby;
+    standby = null;
+  } else if (standby) {
+    dropStandby();
+  }
+
+  const out = handoff ? handoff.out : tempWav();
 
   return new Promise((resolve, reject) => {
-    const proc = spawn(EXE, [
-      '--model', voicePath(currentVoiceId),
-      '--output_file', out,
-      '--length_scale', String(v.lengthScale),
-      '--noise_scale', String(v.noiseScale),
-      '--noise_w', String(v.noiseW),
-    ], {
-      cwd: path.join(ROOT, 'piper'),   // espeak-ng-data is resolved relative to cwd
-      windowsHide: true,
-    });
+    const proc = handoff ? handoff.proc : spawnPiper(out);
     current = proc;
 
-    let stderr = '';
+    // A handed-off process has been running since before this call, so seed
+    // from what it already logged — otherwise a startup complaint (a bad model
+    // path, missing espeak data) is lost and the error says nothing useful.
+    let stderr = handoff ? handoff.stderr : '';
     proc.stderr.on('data', (d) => { stderr += d.toString(); });
 
     proc.on('error', (err) => {
       current = null;
+      fs.promises.unlink(out).catch(() => {});
       reject(new Error(`piper failed to start: ${err.message}`));
     });
 
     proc.on('close', (code, signal) => {
       current = null;
-      if (signal) { resolve(null); return; }   // cancelled, not an error
+
+      /*
+       * Re-park only now that synthesis is finished, not when it started.
+       *
+       * Warming costs a full model load, and doing it alongside the synthesis
+       * it is meant to accelerate just made them compete: measured 778-849ms
+       * per answer with the load running concurrently, against ~500ms when the
+       * standby had the machine to itself. Starting here means the load
+       * overlaps PLAYBACK instead — seconds of audio during which nothing else
+       * needs the CPU, and far more than the ~800ms it takes.
+       */
+      setImmediate(warm);
+
+      // Every exit path deletes the temp file. The cancelled branch used to
+      // return before the cleanup below, so barge-in — which happens on every
+      // interruption — left a WAV behind in the temp directory each time.
+      const done = (fn) => { fs.promises.unlink(out).catch(() => {}); fn(); };
+
+      if (signal) { done(() => resolve(null)); return; }   // cancelled, not an error
       if (code !== 0) {
-        reject(new Error(`piper exited ${code}: ${stderr.trim().split('\n').slice(-2).join(' ')}`));
+        done(() => reject(new Error(
+          `piper exited ${code}: ${stderr.trim().split('\n').slice(-2).join(' ')}`)));
         return;
       }
+      let wav = null;
       try {
-        const wav = fs.readFileSync(out);
-        resolve(wav);
+        wav = fs.readFileSync(out);
       } catch (err) {
-        reject(new Error(`piper produced no audio: ${err.message}`));
-      } finally {
-        fs.promises.unlink(out).catch(() => {});
+        done(() => reject(new Error(`piper produced no audio: ${err.message}`)));
+        return;
       }
+      done(() => resolve(wav));
     });
 
     proc.stdin.on('error', () => {});   // killed mid-write
@@ -219,4 +334,16 @@ function cancel() {
   current = null;
 }
 
-module.exports = { speak, cancel, available, describe, setVoice, installedVoices, VOICES };
+/**
+ * Release the parked process. For app quit — an idle piper holds a 60MB model
+ * resident, and its unused temp file should not outlive the app.
+ */
+function shutdown() {
+  cancel();
+  dropStandby();
+}
+
+module.exports = {
+  speak, cancel, available, describe, setVoice, installedVoices, VOICES,
+  warm, shutdown,
+};

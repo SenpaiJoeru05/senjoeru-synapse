@@ -35,6 +35,12 @@ jobs:
         run: node --test services/*.test.js lib/*.test.js
         working-directory: backend
 
+      # shared/ is required by both the backend and the Electron main process,
+      # so a break here takes out the dashboard and Assistant Mode together.
+      # It had no coverage at all until the usage-limits work.
+      - name: Shared tests
+        run: node --test shared/*.test.js
+
       - name: Example config is valid
         run: node -e "require('./metrics/config.example.json')"
 

@@ -17,8 +17,12 @@
  * status questions, not engineering work.
  */
 const { spawn } = require('child_process');
+const { randomUUID } = require('crypto');
 const fs = require('fs');
 const path = require('path');
+
+const usage = require('../shared/usage-store');
+const { resumeFlags } = require('../shared/assistant-session');
 
 /**
  * Model for one-shot questions. Startup dominates the latency (measured ~5.5s
@@ -51,13 +55,42 @@ const AGENT = 'joeru';
  * Joeru's own AGENTS.md already asks for brevity, but that is calibrated for
  * someone reading a terminal, where a list is fine. Spoken, a list is not.
  */
+/*
+ * How the answer should sound.
+ *
+ * The earlier version of this was all prohibitions — no lists, no markdown, no
+ * numerals, two sentences maximum — and it got exactly what it asked for:
+ * clipped, characterless replies. Constraints alone cannot produce a voice.
+ * Nothing here told the model to lead with the answer, to sound like a person,
+ * or what to do when it does not know, so it defaulted to reciting.
+ *
+ * So the negatives stay, because each has a real cause — a spoken bullet point
+ * is unintelligible, a spoken file path is worse — but they now come after a
+ * description of what good sounds like.
+ */
 const VOICE_STYLE = [
-  'Your answer will be spoken aloud by a text-to-speech voice, not read.',
-  'Answer in at most two short sentences. Never use lists, bullet points,',
-  'headings, code blocks, file paths, or markdown — they are unintelligible',
-  'when spoken. Prefer plain words over symbols and numerals. If the honest',
-  'answer needs more detail than that, give the headline only and offer to',
-  'go deeper.',
+  'Your reply will be SPOKEN ALOUD by a text-to-speech voice, not read on a',
+  'screen. Write what a sharp, unhurried colleague would actually say out loud.',
+
+  'Lead with the answer in the first few words — never with a preamble, a',
+  'restatement of the question, or "based on the current state". Then at most',
+  'one sentence of the detail that matters. Two sentences is the target and',
+  'four the hard ceiling; if the full answer is longer than that, give the',
+  'headline and say you can go into detail if wanted.',
+
+  'Sound like a person: contractions, ordinary words, and the occasional',
+  'connective like "though" or "so". Say what a number MEANS rather than',
+  'reciting it — "you are nearly six times over the budget" lands, "595',
+  'percent" does not. Round for speech: "about twenty-seven dollars", not',
+  '"26 dollars and 74 cents". Do not open with the same phrase every time.',
+
+  'Never use lists, bullet points, headings, code blocks, file paths, URLs,',
+  'markdown or emoji — all of them are noise when spoken. Prefer words to',
+  'symbols. Say "per cent" not "%", and spell out counts under twenty.',
+
+  'Do not be sycophantic and do not thank the user for asking. If you do not',
+  'know, say so in one short sentence and name what you would need — a guess',
+  'delivered in a confident voice is the worst thing you can produce here.',
 ].join(' ');
 
 /** A question that has not answered in this long is not going to. */
@@ -170,7 +203,100 @@ let current = null;
  * said, and quoting arbitrary speech through cmd.exe is a bug waiting to
  * happen (an apostrophe or a double quote would truncate or corrupt it).
  */
-function ask(question) {
+/**
+ * Flags that make the CLI emit a readable event stream.
+ *
+ * Shared so ask() and chat() cannot drift: the moment one of them streamed
+ * tool calls and the other did not, Assistant Mode had no idea what was being
+ * read while Chat showed every file by name.
+ */
+const STREAM_FLAGS = [
+  '--output-format', 'stream-json', '--verbose',
+  // Token deltas. Note this does NOT replace the complete `assistant` events —
+  // both arrive, which is why text is read only from deltas below.
+  '--include-partial-messages',
+];
+
+/**
+ * A reader for the CLI's newline-delimited JSON stream.
+ *
+ * Buffers the tail on purpose. A chunk boundary can fall mid-object, so
+ * parsing each chunk on its own drops events at random under load — which
+ * shows up as a tool call that sometimes appears and sometimes does not.
+ */
+function makeStreamReader(onEvent = () => {}) {
+  let buffer = '';
+  const state = { text: '', tools: [], costUsd: null, turns: null };
+
+  function handle(event) {
+    if (event?.type === 'stream_event' && event.event?.type === 'content_block_delta') {
+      const delta = event.event.delta;
+      if (delta?.type === 'text_delta' && delta.text) {
+        state.text += delta.text;
+        onEvent({ type: 'text', text: delta.text });
+      } else if (delta?.type === 'thinking_delta' && delta.thinking) {
+        onEvent({ type: 'reasoning', text: delta.thinking });
+      }
+      return;
+    }
+
+    const blocks = event?.message?.content;
+    if (Array.isArray(blocks)) {
+      for (const b of blocks) {
+        // tool_use only. Text here is the settled version of what the deltas
+        // already delivered, and taking both duplicates the whole reply.
+        if (b.type === 'tool_use') {
+          const entry = { name: b.name, input: b.input, at: Date.now() };
+          state.tools.push(entry);
+          onEvent({ type: 'tool', ...entry });
+        }
+      }
+      return;
+    }
+
+    /*
+     * Real account usage, free.
+     *
+     * The plan windows are account-wide, so this one-line Haiku answer reports
+     * the same 5h/7d utilisation as a heavy Opus session in the terminal. That
+     * is what makes this worth reading here rather than polling an endpoint:
+     * the numbers are already in the stream of a call we were making anyway.
+     *
+     * Emitted only when the figures change, so its absence is normal and must
+     * never be read as "usage is zero".
+     */
+    if (event?.type === 'rate_limit_event') {
+      usage.recordStreamEvent(event.rate_limit_info);
+      return;
+    }
+
+    if (event?.type === 'result') {
+      // The result event carries the settled answer; prefer it over the
+      // accumulated deltas, which can include intermediate text.
+      if (typeof event.result === 'string' && event.result.trim()) state.text = event.result;
+      state.costUsd = event.total_cost_usd ?? null;
+      state.turns = event.num_turns ?? null;
+      onEvent({ type: 'done', costUsd: state.costUsd, turns: state.turns });
+    }
+  }
+
+  return {
+    feed(chunk) {
+      buffer += chunk.toString();
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try { handle(JSON.parse(line)); } catch { /* not a complete object */ }
+      }
+    },
+    result() {
+      return { text: state.text.trim(), tools: state.tools, costUsd: state.costUsd };
+    },
+  };
+}
+
+function ask(question, onEvent, sessionId = null) {
   cancel();
 
   const q = String(question || '').trim();
@@ -182,50 +308,109 @@ function ask(question) {
   return new Promise((resolve, reject) => {
     const dirs = extraDirs();
 
+    /*
+     * One conversation, continued.
+     *
+     * This used to mint a fresh session per question, which meant Joeru
+     * genuinely could not remember the previous sentence — continuity was
+     * faked by pasting the last four exchanges into the prompt, and broke on
+     * the fifth. The caller now supplies the session for the whole app run;
+     * see shared/assistant-session.js for the measurements behind that, and
+     * why it costs less rather than more.
+     *
+     * Falling back to a fresh id keeps this callable without a session — the
+     * alternative is throwing inside a voice answer, which would be a worse
+     * failure than a turn that simply forgets.
+     */
+    const session = String(sessionId || '').trim() || randomUUID();
+
     // No shell: the exe is invoked directly, so arguments containing spaces
     // need no quoting and cannot be re-split.
     const proc = spawn(cli, [
       '-p', '--agent', AGENT, '--model', MODEL,
+      // Start or continue — one shared decision, tested in shared/. Getting
+      // it backwards is how "Session ID already in use" happened.
+      ...resumeFlags(session, { started, exists: transcriptExists }),
       // Append rather than replace: --system-prompt would discard the agent's
       // persona and this project's context, which are the reason for using
       // the agent at all.
       '--append-system-prompt', VOICE_STYLE,
       '--allowedTools', ...ALLOWED_TOOLS,
       ...(dirs.length ? ['--add-dir', ...dirs] : []),
+      /*
+       * Streamed, so the voice window can show what is being read.
+       *
+       * This used to be plain text, which meant Assistant Mode had no idea
+       * what was happening during a thirteen-second wait while Chat showed
+       * every file by name. The answer is still returned as one string —
+       * callers are unchanged — the events are additional.
+       */
+      ...STREAM_FLAGS,
     ], {
       windowsHide: true,
       // Run from the dashboard repo so any project-level context it picks up is
       // this project's, not whatever directory Electron happened to start in.
       cwd: path.join(__dirname, '..'),
     });
+    started.add(session);
     current = proc;
 
-    let out = '';
+    const reader = makeStreamReader(onEvent);
     let err = '';
     const timer = setTimeout(() => {
       try { proc.kill(); } catch { /* already gone */ }
       reject(new Error(`Claude did not answer within ${TIMEOUT_MS / 1000}s`));
     }, TIMEOUT_MS);
 
-    proc.stdout.on('data', (d) => { out += d.toString(); });
+    proc.stdout.on('data', (d) => reader.feed(d));
     proc.stderr.on('data', (d) => { err += d.toString(); });
+
+    /*
+     * Un-remember a session the CLI never actually created.
+     *
+     * `started` is added to at spawn time as a fast path, for the window where
+     * we know the session exists but its transcript is not yet flushed. If the
+     * spawn or the turn then FAILS, that entry is a lie — and with one session
+     * held for the whole app run it is a durable one: every later question
+     * would ask to --resume a session the CLI has no record of, and be refused.
+     * A single failed first question would break voice until restart.
+     *
+     * The disk is the arbiter, as everywhere else here: keep the entry only if
+     * a transcript really exists.
+     */
+    const forgetIfNeverCreated = () => {
+      try {
+        if (!transcriptExists(session)) started.delete(session);
+      } catch {
+        started.delete(session);
+      }
+    };
 
     proc.on('error', (e) => {
       clearTimeout(timer);
       current = null;
+      forgetIfNeverCreated();
       reject(new Error(`could not start Claude Code: ${e.message}`));
     });
 
     proc.on('close', (code, signal) => {
       clearTimeout(timer);
       current = null;
-      if (signal) { resolve(''); return; }   // cancelled
+      if (signal) {
+        // Cancelled. The transcript may or may not exist depending on how far
+        // the turn got, so ask rather than assume.
+        forgetIfNeverCreated();
+        resolve('');
+        return;
+      }
 
-      const text = out.trim();
+      const { text } = reader.result();
       if (code !== 0) {
-        // The CLI reports quota and auth problems on stderr; pass the real
-        // message through rather than a generic failure.
-        const detail = (err.trim() || text).split('\n').filter(Boolean).slice(-3).join(' ');
+        forgetIfNeverCreated();
+        // Colour codes stripped first: they make the message unreadable and
+        // stop the caller's failure patterns matching the words in it.
+        const detail = stripAnsi(err.trim() || text)
+          .split('\n').filter(Boolean).slice(-3).join(' ');
         reject(new Error(detail || `Claude Code exited ${code}`));
         return;
       }
@@ -244,4 +429,201 @@ function cancel() {
   current = null;
 }
 
-module.exports = { ask, cancel, describe, MODEL, AGENT };
+/* ── the Chat tab: a real conversation, not a one-shot ─────────────────────── */
+
+/**
+ * A turn in the Chat tab, on the Claude Code CLI.
+ *
+ * Two things make this different from ask() above, and both are deliberate.
+ *
+ * IT KEEPS A SESSION. `--session-id <uuid>` on the first turn and `--resume` on
+ * every one after it; the CLI persists the conversation itself. Verified in
+ * print mode — a fact given in turn one was recalled in turn two. Assistant
+ * Mode instead re-sends its last four exchanges every time, which is right for
+ * a voice window that refers back a turn or two, and wrong here: Chat sessions
+ * run long, and re-sending the whole history each turn makes input grow
+ * quadratically. Measured on this machine, cache reads were already the single
+ * largest cost component of a CLI call — about $1.01 of a $2.17 request — so
+ * paying to re-read a growing transcript is the expensive way to do this.
+ *
+ * IT DOES NOT PIN A MODEL. ask() forces haiku because you are talking to it and
+ * latency dominates. Here the agent's own declared tier applies: joeru gets
+ * opus, frontend-engineer gets sonnet, from joeru-kit's targets.json. That is
+ * what the tier system is for, and measurement supports it — on a real planning
+ * task all four Opus configurations spotted that SDL capture indices renumber
+ * when a device is plugged in (so a device must be persisted by NAME, not
+ * index) and neither Sonnet configuration did. Pinning a fast model here would
+ * throw that away.
+ *
+ * Tools match ask() exactly — Read, Write, Edit, Glob, Grep. No Bash. Chat is
+ * the defensible place to widen that, since you are watching and can read the
+ * diff, but widening it is a decision to take on purpose rather than a side
+ * effect of moving Chat onto this runner.
+ */
+const CHAT_TIMEOUT_MS = 600_000;
+
+/** Session ids the CLI has already seen, so the next turn resumes instead of colliding. */
+const started = new Set();
+
+/**
+ * The process serving each session, so a turn can be cancelled precisely.
+ *
+ * Not the module-level `current` that ask() and cancel() share: both the Chat
+ * tab and Assistant Mode go through this file, and `current` holds whichever
+ * spawned last. Pressing stop in Chat would then kill an Assistant Mode answer
+ * that happened to start after it — two windows, one variable, and the wrong
+ * one dies.
+ */
+const inFlight = new Map();
+
+/**
+ * Does the CLI already hold a transcript for this session?
+ *
+ * Required lazily so this module keeps working if the sessions helper is ever
+ * moved or removed — a failure to answer degrades to "treat it as new", which
+ * is the same behaviour as before this check existed.
+ */
+function transcriptExists(sessionId) {
+  try {
+    // eslint-disable-next-line global-require
+    const sessions = require('./claude-sessions');
+    const dir = sessions.sessionDir(path.join(__dirname, '..'));
+    return Boolean(dir && fs.existsSync(path.join(dir, `${sessionId}.jsonl`)));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Strip terminal colour codes from a CLI message.
+ *
+ * The CLI writes its errors for a terminal, so the raw text arrives wrapped in
+ * escape sequences — the "already in use" error reached the UI as
+ * `[0m[31m[31mError: …[39m[0m`, which is both unreadable and stops the
+ * failure patterns from matching what they are looking for.
+ */
+function stripAnsi(text) {
+  /*
+   * The escape byte is OPTIONAL in this pattern, and that is the point.
+   *
+   * By the time a message has crossed a pipe and a JSON round trip the 0x1b
+   * can already be gone, leaving the bare "[0m[31m" that reached the UI in
+   * the reported failure. A pattern that requires the escape byte cleans the
+   * raw form and leaves the one you actually see.
+   *
+   * Spelled as a unicode escape rather than a literal control character: the
+   * first version of this line carried a real 0x1b byte in the source, which
+   * is invisible in an editor and made the pattern silently stricter than it
+   * appeared. cat -A was what revealed it.
+   */
+  // eslint-disable-next-line no-control-regex
+  return String(text || '').replace(/\u001b?\[[0-9;]*[A-Za-z]/g, '');
+}
+
+/**
+ * Ask within a session. Resolves with the text, and reports tool use as it
+ * happens through `onEvent`.
+ *
+ * stream-json rather than plain text because it carries every tool call with
+ * its full arguments — a Read event names the file, an Edit event carries the
+ * before and after. That is what lets the UI show what the agent is actually
+ * touching instead of asserting that something happened.
+ */
+function chat({ sessionId, agent, text }, onEvent = () => {}) {
+  const cli = findCli();
+  if (!cli) return Promise.reject(new Error(describe().reason));
+
+  const q = String(text || '').trim();
+  if (!q) return Promise.resolve({ text: '', tools: [] });
+  if (!sessionId) return Promise.reject(new Error('a session id is required'));
+
+  /*
+   * Start or continue — the same decision Assistant Mode makes, in one place.
+   *
+   * It used to be an inline conditional here and nowhere else, which is how it
+   * shipped wrong and produced "Session ID <uuid> is already in use". It now
+   * lives in shared/assistant-session.js with the tests that pin the case that
+   * broke, and both callers ask that function rather than each keeping their
+   * own version to drift apart.
+   */
+  const dirs = extraDirs();
+
+  return new Promise((resolve, reject) => {
+    const proc = spawn(cli, [
+      '-p',
+      ...resumeFlags(sessionId, { started, exists: transcriptExists }),
+      '--agent', agent || AGENT,
+      // No --model: the agent's declared tier decides. See the note above.
+      ...STREAM_FLAGS,
+      '--allowedTools', ...ALLOWED_TOOLS,
+      ...(dirs.length ? ['--add-dir', ...dirs] : []),
+    ], { windowsHide: true, cwd: path.join(__dirname, '..') });
+
+    started.add(sessionId);
+    current = proc;
+    inFlight.set(sessionId, proc);
+
+    const reader = makeStreamReader(onEvent);
+    let err = '';
+
+    const timer = setTimeout(() => {
+      try { proc.kill(); } catch { /* gone */ }
+      reject(new Error(`Claude did not finish within ${CHAT_TIMEOUT_MS / 60_000} minutes`));
+    }, CHAT_TIMEOUT_MS);
+
+    proc.stdout.on('data', (d) => reader.feed(d));
+    proc.stderr.on('data', (d) => { err += d.toString(); });
+
+    proc.on('error', (e) => {
+      clearTimeout(timer);
+      current = null;
+      reject(new Error(`could not start Claude Code: ${e.message}`));
+    });
+
+    proc.on('close', (code, signal) => {
+      clearTimeout(timer);
+      current = null;
+      inFlight.delete(sessionId);
+      if (signal) {
+        const partial = reader.result();
+        resolve({ text: partial.text, tools: partial.tools, cancelled: true });
+        return;
+      }
+      if (code !== 0) {
+        // Colour codes stripped before the message goes anywhere: they made
+        // the text unreadable in the UI and stopped the failure patterns from
+        // matching the words they look for.
+        const detail = stripAnsi(err).trim().split('\n').filter(Boolean).slice(-3).join(' ');
+        reject(new Error(detail || `Claude Code exited ${code}`));
+        return;
+      }
+      resolve(reader.result());
+    });
+
+    proc.stdin.on('error', () => {});
+    proc.stdin.end(q);
+  });
+}
+
+/**
+ * Stop the turn in flight for one session.
+ *
+ * Returns whether there was anything to stop, so the caller can tell a real
+ * cancellation from a button pressed after the answer already landed.
+ */
+function cancelChat(sessionId) {
+  const proc = inFlight.get(sessionId);
+  if (!proc || proc.killed) return false;
+  try { proc.kill(); } catch { /* already gone */ }
+  inFlight.delete(sessionId);
+  return true;
+}
+
+/** Forget a session, so a fresh one with the same id starts rather than resumes. */
+function forget(sessionId) {
+  started.delete(sessionId);
+}
+
+module.exports = {
+  ask, chat, cancelChat, forget, cancel, describe, MODEL, AGENT, ALLOWED_TOOLS,
+};

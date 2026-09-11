@@ -12,12 +12,25 @@
  * to Joeru, which is slower and spends tokens — and the UI says which happened.
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Bot, Send, Volume2, VolumeX, X, Loader2, Zap, Cloud, Mic, Sparkles } from 'lucide-react'
+import {
+  Bot, Send, Volume2, VolumeX, X, Loader2, Zap, Cloud, Mic, Sparkles, Terminal,
+  MessageSquarePlus,
+} from 'lucide-react'
 import { answerLocally, classify, type Answer } from '../lib/assistant-intents'
 import { api } from '../lib/api'
 import VoiceOrb from '../components/VoiceOrb'
+import AssistantStats, { useWideEnough } from '../components/AssistantStats'
 import type { AssistantInsights } from '../electron'
-import { currentState, ground } from '../lib/grounding'
+import { currentState, ground, type Exchange } from '../lib/grounding'
+import { acknowledgement } from '../lib/acknowledge'
+import {
+  parse as parseTaskAction, apply as applyTask, confirmationFor, isYes, isNo,
+  type ActionParse as TaskAction, type TaskRef, type TaskStatus,
+} from '../lib/task-actions'
+import {
+  parse as parseMemory, apply as applyMemory,
+  confirmationFor as memoryConfirmation, type MemoryDraft,
+} from '../lib/memory-actions'
 import {
   say, hush, hear, stopHearing, voiceAvailable, disposeVoice, MicLevel,
   usesMainProcessCapture, beginListening, endListening, abortListening,
@@ -73,6 +86,23 @@ const AGENT = 'joeru'
 const MODEL: { providerID: string; modelID: string } | undefined = {
   providerID: 'opencode',
   modelID: 'muse-spark-1.3-contributor-free',
+}
+
+/**
+ * The one argument worth showing for a tool call.
+ *
+ * Both spellings, because the CLI sends file_path where OpenCode sent
+ * filePath — and the filename is the whole point of showing a Read at all.
+ * Basename only: this window is 440px wide and a full Windows path fills it.
+ */
+function toolDetail(input: unknown): string {
+  if (!input || typeof input !== 'object') return ''
+  const o = input as Record<string, unknown>
+  const raw = o.file_path ?? o.filePath ?? o.path ?? o.pattern ?? o.query ?? ''
+  // Both separators in the class. The CLI reports Windows paths with
+  // backslashes, so a forward-slash-only pattern shortens nothing and the
+  // full "D:\Personal Works\..." fills the window.
+  return String(raw).replace(/^.*[\\/]([^\\/]+)$/, '$1').slice(0, 40)
 }
 
 /**
@@ -172,6 +202,8 @@ export default function Assistant() {
   const [phase, setPhase] = useState<Phase>('idle')
   const [muted, setMuted] = useState(false)
   const [status, setStatus] = useState<string | null>(null)
+  /** Tools touched during the answer in flight, in order. */
+  const [activity, setActivity] = useState<{ tool: string; detail: string }[]>([])
   const [analyser, setAnalyser] = useState<AnalyserNode | null>(null)
   const [voiceReady, setVoiceReady] = useState(false)
   const [voices, setVoices] = useState<{ id: string; label: string; current: boolean }[]>([])
@@ -182,8 +214,38 @@ export default function Assistant() {
   const micRef = useRef<MicLevel | null>(null)
   /** Set while listening; calling it ends the turn. */
   const stopListeningRef = useRef<(() => void) | null>(null)
+  /** True only while the "on it" line is playing, not the answer. */
+  const ackingRef = useRef(false)
+  /**
+   * The last few exchanges, sent with each question so follow-ups resolve.
+   *
+   * A ref rather than state because `ask` must always read the newest value.
+   * Held as state it would be captured in the callback's closure, and a
+   * question asked right after an answer would ship the history from before
+   * it — the one turn that matters most for "mark that as complete".
+   */
+  const recentRef = useRef<Exchange[]>([])
+  /**
+   * A change that has been understood but NOT performed.
+   *
+   * Held until an explicit yes. Read-only intents can afford to act on a
+   * misrecognition — it costs a moment. These two write: "mark task three
+   * complete" heard as task eight is not undone by saying no afterwards, and a
+   * misheard memory is worse than a missing one, being wrong, permanent, and
+   * read as authoritative by every agent after it.
+   *
+   * One ref for both kinds rather than one each, so there can only ever be a
+   * single outstanding question. Two would let a yes answer the wrong one.
+   */
+  const pendingRef = useRef<
+    | { kind: 'task'; task: TaskRef; status: TaskStatus }
+    | { kind: 'memory'; draft: MemoryDraft }
+    | null
+  >(null)
   const sessionRef = useRef<string | null>(null)
   const busy = phase !== 'idle'
+  // Drives whether the stats rail has room to render.
+  const wide = useWideEnough()
 
   useEffect(() => { mutedRef.current = muted }, [muted])
 
@@ -228,6 +290,145 @@ export default function Assistant() {
     }
   }, [])
 
+  /**
+   * Say "on it" while the slow work runs, and return when that has finished
+   * speaking — NOT when the work has.
+   *
+   * Separate from speakAnswer because the phase afterwards is different: an
+   * answer ends the turn and goes idle, whereas this hands back to 'thinking'
+   * because the actual work is still running behind it.
+   *
+   * Never rejects. This is a courtesy over the top of the real request, so a
+   * synthesis failure here must not take down the answer the user is waiting
+   * for — it just goes back to being silent.
+   */
+  const speakAck = useCallback(async (question: string) => {
+    if (mutedRef.current || !voiceAvailable()) return
+    const line = acknowledgement(question)
+    setStatus(line)
+    setPhase('speaking')
+    ackingRef.current = true
+    try {
+      await say(line, (a) => setAnalyser(a))
+    } catch {
+      /* the answer still matters; stay quiet and carry on */
+    } finally {
+      ackingRef.current = false
+      setAnalyser(null)
+      // Back to thinking, not idle: the request this covers is still in flight.
+      setPhase('thinking')
+    }
+  }, [])
+
+  /**
+   * Record an exchange for the next question's context.
+   *
+   * A few more than ground() sends, so it can pick the most recent without
+   * this having to know how many that is.
+   */
+  const remember = useCallback((
+    question: string,
+    answer: string,
+    /*
+     * Which brain answered, because it decides whether this turn gets
+     * re-sent. Assistant Mode now holds one CLI session, so turns the CLI
+     * answered are already in its transcript and quoting them back would
+     * show it the same exchange twice. Locally-answered turns are invisible
+     * to it and MUST be re-sent — see history() in grounding.ts.
+     *
+     * Defaults to 'local' because that is the majority and the safe side: a
+     * turn wrongly marked local is merely repeated, while one wrongly marked
+     * 'claude' vanishes from the context that needs it.
+     */
+    source: 'local' | 'claude' | 'joeru' = 'local',
+  ) => {
+    recentRef.current = [...recentRef.current, { question, answer, source }].slice(-8)
+  }, [])
+
+  /**
+   * Start a fresh conversation.
+   *
+   * The session is held in the main process, so this is the only way to clear
+   * it short of quitting — and it is needed, because "resets on restart" is no
+   * bound at all on a window left open for days. Each turn adds context, and a
+   * misheard command can leave the conversation confused in a way only a clean
+   * slate fixes.
+   *
+   * The old conversation is kept, not deleted: it keeps its "Assistant Mode —
+   * <time>" title and stays openable from Chat.
+   */
+  const newConversation = useCallback(async () => {
+    if (!window.electronAPI?.assistantNewConversation) return
+    try {
+      await window.electronAPI.assistantNewConversation()
+    } catch {
+      // A failed reset must not wedge the window; the old session still works.
+      return
+    }
+    // Local history goes too, or the next question would quote turns from a
+    // conversation the CLI no longer has.
+    recentRef.current = []
+    setTurns([])
+  }, [])
+
+  /** Perform a confirmed change. Reports failure rather than throwing. */
+  const applyTaskStatus = useCallback(async (id: string, status: TaskStatus) => {
+    try {
+      await applyTask(id, status)
+      return true
+    } catch (e: any) {
+      setStatus(`could not update the task: ${e?.response?.data?.error ?? e?.message ?? e}`)
+      return false
+    }
+  }, [])
+
+  /**
+   * File a confirmed memory, and say where it went.
+   *
+   * The folder and filename are spoken back on success because they are how
+   * you would find it again — and because they were chosen by a heuristic, so
+   * hearing "as a preference" is the moment to notice it guessed wrong.
+   */
+  const saveMemory = useCallback(async (draft: MemoryDraft) => {
+    try {
+      const r = await applyMemory(draft)
+      const verb = r?.created === false ? 'Updated' : 'Filed'
+      return `${verb} under ${draft.folder}, as ${draft.slug}.`
+    } catch (e: any) {
+      const reason = e?.response?.data?.error ?? e?.message ?? e
+      setStatus(`could not save that memory: ${reason}`)
+      // Named out loud, because a memory you believe was filed and was not is
+      // the failure that costs you the fact.
+      return `I could not save that. ${reason}`
+    }
+  }, [])
+
+  /**
+   * Turn a parsed command into something to say — and, when it is
+   * unambiguous, arm the confirmation.
+   *
+   * Arming here rather than in the parser keeps the parser pure: it decides
+   * what was meant, this decides what happens next.
+   */
+  const describeAction = useCallback(async (
+    // Never called with kind:none — the caller has already returned by then,
+    // and saying so in the type is what lets the notFound branch below read
+    // its `described` field without a cast.
+    action: Exclude<TaskAction, { kind: 'none' }>,
+  ): Promise<string> => {
+    if (action.kind === 'ready') {
+      pendingRef.current = { kind: 'task', task: action.task, status: action.status }
+      return confirmationFor(action.task, action.status)
+    }
+    if (action.kind === 'ambiguous') {
+      // Named, not counted: "which one" is unanswerable without hearing the
+      // options, and the screen carries the full list alongside.
+      const names = action.candidates.slice(0, 3).map((c) => c.title).join(', or ')
+      return `There are ${action.candidates.length} tasks ${action.described}. Which one — ${names}?`
+    }
+    return `I could not find ${action.described} to change.`
+  }, [])
+
   async function ensureSession(): Promise<string> {
     if (sessionRef.current) return sessionRef.current
     const s = await api.joeruCreateSession('Assistant Mode (voice)')
@@ -243,6 +444,9 @@ export default function Assistant() {
     setInput('')
     setStatus(null)
     setPhase('thinking')
+    // A fresh question starts a fresh trace; leaving the last one visible
+    // would attribute the previous answer's work to this one.
+    setActivity([])
     setTurns((t) => [...t, { question: q, answer: null, pending: true }])
 
     // Recorded for every turn so the slow ones can be found later and made
@@ -252,14 +456,136 @@ export default function Assistant() {
       window.electronAPI?.logQuestion?.({ question: q, route, ms: Date.now() - askedAt, intent })
     }
 
+    // Declared out here so the catch below can wait on it too; scoped inside
+    // the try it would be invisible there.
+    let acked: Promise<void> | null = null
+
     try {
+      /*
+       * A pending confirmation owns the next thing said, whatever it is.
+       *
+       * Checked before anything else so "yes" cannot be classified as small
+       * talk and answered with "anytime" while the change is silently dropped.
+       * Anything that is not a clear yes or no cancels and is then treated as
+       * a fresh question — an unclear reply must never count as consent.
+       */
+      const pending = pendingRef.current
+      if (pending) {
+        pendingRef.current = null
+        if (isYes(q)) {
+          const said = pending.kind === 'task'
+            ? (await applyTaskStatus(pending.task.id, pending.status)
+              ? `Done. ${pending.task.title} is now ${pending.status.toLowerCase()}.`
+              : `I could not update ${pending.task.title}.`)
+            : await saveMemory(pending.draft)
+          log('local', pending.kind === 'task' ? 'task-action' : 'memory-write')
+          remember(q, said)
+          setTurns((t) => [...t.slice(0, -1), {
+            question: q,
+            answer: { intent: 'chat', speech: said, lines: [], source: 'local' },
+          }])
+          await speakAnswer(said)
+          return
+        }
+        if (isNo(q)) {
+          const said = 'Left as it was.'
+          log('local', 'task-action')
+          remember(q, said)
+          setTurns((t) => [...t.slice(0, -1), {
+            question: q,
+            answer: { intent: 'chat', speech: said, lines: [], source: 'local' },
+          }])
+          await speakAnswer(said)
+          return
+        }
+        // Neither — fall through and answer it as a question, having cancelled.
+        setStatus('Cancelled the change.')
+      }
+
+      /*
+       * "Remember that…" before task commands, because they collide.
+       *
+       * Task parsing needs an instruction verb AND a status word, and "make a
+       * note that the whisper work is done" has both — "make" and "done" — so
+       * reaching task parsing first would file nothing and instead offer to
+       * complete a task nobody mentioned. Memory verbs are unambiguous, so
+       * testing them first costs nothing and removes the overlap.
+       */
+      const memory = parseMemory(q)
+      if (memory.kind !== 'none') {
+        const said = memory.kind === 'ready'
+          ? (() => {
+            pendingRef.current = { kind: 'memory', draft: memory.draft }
+            return memoryConfirmation(memory.draft)
+          })()
+          : 'Remember what?'
+        log('local', 'memory-write')
+        remember(q, said)
+        setTurns((t) => [...t.slice(0, -1), {
+          question: q,
+          answer: {
+            intent: 'chat',
+            speech: said,
+            lines: memory.kind === 'ready'
+              ? [`${memory.draft.folder}/${memory.draft.slug}.md`]
+              : [],
+            source: 'local',
+          },
+        }])
+        await speakAnswer(said)
+        return
+      }
+
+      /*
+       * Task commands, before the read-only intents.
+       *
+       * Their keywords overlap: "mark the review task complete" contains
+       * "review", and "complete" would otherwise never be reached. A command
+       * has to be recognised as a command before anything tries to read it as
+       * a question.
+       */
+      const action = await parseTaskAction(q)
+      if (action.kind !== 'none') {
+        const said = await describeAction(action)
+        log('local', 'task-action')
+        remember(q, said)
+        setTurns((t) => [...t.slice(0, -1), {
+          question: q,
+          answer: {
+            intent: 'chat',
+            speech: said,
+            lines: action.kind === 'ambiguous'
+              ? action.candidates.map((c) => `${c.id} · ${c.status} · ${c.title}`)
+              : [],
+            source: 'local',
+          },
+        }])
+        await speakAnswer(said)
+        return
+      }
+
       const local = await answerLocally(q)
       if (local) {
         log('local', local.intent)
+        remember(q, local.speech)
         setTurns((t) => [...t.slice(0, -1), { question: q, answer: local }])
         await speakAnswer(local.speech)
         return
       }
+
+      /*
+       * Past here every route takes seconds, so say something now.
+       *
+       * Started but NOT awaited: the acknowledgement synthesises and plays
+       * while the request is already in flight, so it costs nothing. Awaiting
+       * it here would add its own second or so to every slow answer, which is
+       * the opposite of the point.
+       *
+       * It sits below the local branch above deliberately. Those answers
+       * return in milliseconds, and prefixing one with "let me check" would
+       * make the fast path sound slow.
+       */
+      acked = speakAck(q)
 
       // Claude Code first, OpenCode as the backstop.
       //
@@ -274,12 +600,67 @@ export default function Assistant() {
           // board and asks the user to supply the answer — observed, not
           // hypothetical. See lib/grounding.ts.
           const state = await currentState()
-          const answer = (await window.electronAPI.claudeAsk(ground(q, state))).trim()
+
+          /*
+           * Watch what it touches while it works.
+           *
+           * The wait here is 6-13 seconds and the window said nothing about
+           * why. The acknowledgement covers the start of it; this covers the
+           * middle, and it does something the spoken line cannot — it shows
+           * whether anything is actually happening. An empty tool list on a
+           * question that should have read the board is the visible version of
+           * the failure that once had this window claiming it had routed work
+           * to a specialist when it had done nothing at all.
+           *
+           * Unsubscribed in `finally`, or every question would add a listener
+           * and one Read would be reported once per question ever asked.
+           */
+          /*
+           * Collected locally AND put in state.
+           *
+           * State drives the live view; the local array is what the finished
+           * answer is built from. Reading `activity` after the await would
+           * give the value captured when this closure was created — empty —
+           * because a state update does not change the variable already
+           * closed over. That is the bug where the trace shows while waiting
+           * and then vanishes the moment the answer lands.
+           */
+          const trace: { tool: string; detail: string }[] = []
+          const off = window.electronAPI.onClaudeAskEvent?.((e) => {
+            if (e.type !== 'tool') return
+            const entry = { tool: e.name ?? 'tool', detail: toolDetail(e.input) }
+            trace.push(entry)
+            setActivity((prev) => [...prev, entry])
+          })
+
+          let answer: string
+          try {
+            answer = (await window.electronAPI.claudeAsk(
+              ground(q, state, recentRef.current),
+            )).trim()
+          } finally {
+            off?.()
+          }
           if (answer) {
+            // Let the acknowledgement finish its last word. Cutting speech
+            // mid-syllable to start the answer sounds like a fault, and by now
+            // it has usually long finished anyway.
+            await acked
             log('claude')
+            remember(q, answer, 'claude')
             setTurns((t) => [...t.slice(0, -1), {
               question: q,
-              answer: { intent: 'ask', speech: answer, lines: [], source: 'claude' },
+              answer: {
+                intent: 'ask',
+                speech: answer,
+                // The receipt, kept past the wait. An empty list on a question
+                // that should have read something is the visible version of a
+                // claim with nothing behind it — which is exactly how this
+                // window once reported routing work to a specialist and doing
+                // nothing at all.
+                lines: trace.map((a) => `${a.tool}${a.detail ? ` · ${a.detail}` : ''}`),
+                source: 'claude',
+              },
             }])
             await speakAnswer(answer)
             return
@@ -300,7 +681,9 @@ export default function Assistant() {
       const text = extractText(reply)
 
       if (failure && !text) {
+        await acked   // as above: never talk over the acknowledgement
         log('failed')
+        remember(q, failure, 'joeru')
         setTurns((t) => [...t.slice(0, -1), {
           question: q,
           answer: { intent: 'ask', speech: failure, lines: [], source: 'joeru' },
@@ -311,14 +694,19 @@ export default function Assistant() {
         return
       }
 
+      await acked   // as above: never talk over the acknowledgement
       log('joeru')
       const said = text || 'Joeru returned nothing.'
+      remember(q, said, 'joeru')
       setTurns((t) => [...t.slice(0, -1), {
         question: q,
         answer: { intent: 'ask', speech: said, lines: [], source: 'joeru' },
       }])
       await speakAnswer(said)
     } catch (err: any) {
+      // The acknowledgement may still be mid-sentence; letting it land keeps
+      // the orb and the audio in step even on the failure path.
+      await acked
       const msg = `That failed: ${err?.message ?? 'unknown error'}`
       setTurns((t) => [...t.slice(0, -1), {
         question: q,
@@ -326,7 +714,7 @@ export default function Assistant() {
       }])
       setPhase('idle')
     }
-  }, [speakAnswer])
+  }, [speakAnswer, speakAck, remember, applyTaskStatus, describeAction, saveMemory])
 
   /**
    * What to do with a transcription, shared by both recognisers.
@@ -359,7 +747,20 @@ export default function Assistant() {
 
   /** One click does the right thing for whatever it is currently doing. */
   async function onOrbClick() {
-    if (phase === 'speaking') { await hush(); setAnalyser(null); setPhase('idle'); return }
+    if (phase === 'speaking') {
+      await hush()
+      setAnalyser(null)
+      /*
+       * Silencing the acknowledgement does NOT cancel the work behind it.
+       *
+       * Going idle here would claim the turn was over while the request was
+       * still running, and the answer would then arrive out of nowhere. The
+       * request is not cancellable mid-flight, so the honest state is the one
+       * that is actually true: still thinking.
+       */
+      setPhase(ackingRef.current ? 'thinking' : 'idle')
+      return
+    }
     if (phase === 'listening') {
       // whisper: the turn is a promise waiting on this second click, so
       // resolving it lets the listening path move on to stop and transcribe.
@@ -464,14 +865,34 @@ export default function Assistant() {
     : status ?? (voiceReady ? 'Click to speak' : 'Voice unavailable — you can still type')
 
   return (
-    <div className="h-screen flex flex-col bg-background text-white overflow-hidden">
+    /*
+     * A tinted ground behind the glass, not flat `bg-background`.
+     *
+     * backdrop-filter has nothing to blur against a solid fill, so the glass
+     * utilities render as plain translucent panels on it. The two radial
+     * washes give the blur something to pick up, which is the whole reason
+     * glassmorphism reads as depth rather than as low-contrast boxes.
+     */
+    <div
+      className="h-screen flex bg-background text-white overflow-hidden"
+      style={{
+        backgroundImage:
+          'radial-gradient(120% 80% at 15% -10%, rgba(34,211,238,0.10), transparent 60%),'
+          + 'radial-gradient(100% 70% at 110% 110%, rgba(99,102,241,0.14), transparent 60%)',
+      }}
+    >
+    <div className="flex-1 min-w-0 flex flex-col">
       <div
         className="flex items-center justify-between px-4 py-3 border-b border-white/10 shrink-0"
         style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
       >
         <div className="flex items-center gap-2">
-          <Bot className="w-4 h-4 text-primary" />
-          <span className="text-sm font-semibold">Assistant Mode</span>
+          {/* A lit chip rather than a bare glyph — the one piece of chrome that
+              says this window is listening for you. */}
+          <span className="w-6 h-6 rounded-lg glass flex items-center justify-center">
+            <Bot className="w-3.5 h-3.5 text-cyan-300" />
+          </span>
+          <span className="text-sm font-semibold tracking-tight">Assistant Mode</span>
         </div>
         <div className="flex items-center gap-1" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
           {voices.length > 1 && (
@@ -490,12 +911,34 @@ export default function Assistant() {
                 }
               }}
               title="Voice"
-              className="bg-surface2 border border-white/10 rounded-lg text-[11px] text-gray-400 px-1.5 py-1 focus:outline-none focus:border-primary"
+              className="glass rounded-lg text-[11px] text-gray-400 px-1.5 py-1 focus:outline-none focus:border-cyan-400/40"
             >
               {voices.map((v) => (
                 <option key={v.id} value={v.id}>{v.id}</option>
               ))}
             </select>
+          )}
+          {/*
+            Start a fresh conversation.
+
+            Assistant Mode holds one CLI session for the app run, which is what
+            makes a follow-up work — but it also means the conversation gets
+            steadily heavier, and a misheard command can leave it confused. This
+            is the clean slate, without quitting the app. Only offered under
+            Electron, where there is a session to reset.
+
+            The old conversation is kept and keeps its title, so it stays
+            openable from Chat.
+          */}
+          {window.electronAPI?.assistantNewConversation && (
+            <button
+              onClick={newConversation}
+              disabled={busy}
+              title="Start a new conversation — Joeru forgets this one (it stays readable in Chat)"
+              className="p-1.5 rounded-lg text-gray-500 hover:text-white hover:bg-white/10 disabled:opacity-40 disabled:hover:bg-transparent"
+            >
+              <MessageSquarePlus className="w-4 h-4" />
+            </button>
           )}
           <button onClick={toggleMute} title={muted ? 'Unmute' : 'Mute'}
             className="p-1.5 rounded-lg text-gray-500 hover:text-white hover:bg-white/10">
@@ -516,7 +959,7 @@ export default function Assistant() {
             <div className="space-y-1">
               {EXAMPLES.map((e) => (
                 <button key={e} onClick={() => ask(e)} disabled={busy}
-                  className="block w-full text-left px-3 py-1.5 rounded-lg bg-surface2 hover:bg-white/10 disabled:opacity-50 text-gray-300 text-xs">
+                  className="block w-full text-left px-3 py-1.5 rounded-xl glass hover:border-cyan-400/30 hover:text-white disabled:opacity-50 text-gray-300 text-xs transition-colors">
                   {e}
                 </button>
               ))}
@@ -533,14 +976,40 @@ export default function Assistant() {
             <div className="text-sm text-gray-400">{t.question}</div>
 
             {t.pending ? (
-              <div className="flex items-center gap-2 text-sm text-gray-500">
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                {classify(t.question) === 'ask'
-                  ? <><span>Asking Joeru…</span><Elapsed /></>
-                  : 'Checking…'}
+              <div className="space-y-1.5">
+                <div className="flex items-center gap-2 text-sm text-gray-500">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  {classify(t.question) === 'ask'
+                    ? <><span>Asking Joeru…</span><Elapsed /></>
+                    : 'Checking…'}
+                </div>
+
+                {/*
+                  What it is touching, as it happens.
+
+                  The newest three only: this window is short, and the useful
+                  question during a wait is "what is it doing now", not "what
+                  has it done". The full list lands on the answer below.
+                */}
+                {activity.length > 0 && (
+                  <div className="pl-5 space-y-0.5">
+                    {activity.slice(-3).map((a, k) => (
+                      <div key={k} className="flex items-baseline gap-1.5 text-[11px]">
+                        <Terminal className="w-2.5 h-2.5 text-cyan-400/70 shrink-0 translate-y-px" />
+                        <span className="font-mono text-cyan-300/80">{a.tool}</span>
+                        {a.detail && <span className="text-gray-600 truncate">{a.detail}</span>}
+                      </div>
+                    ))}
+                    {activity.length > 3 && (
+                      <div className="text-[10px] text-gray-700 pl-4">
+                        +{activity.length - 3} earlier
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             ) : t.answer ? (
-              <div className="rounded-xl bg-surface2 p-3 space-y-2">
+              <div className="glass rounded-2xl p-3 space-y-2">
                 <div className="flex items-start gap-2">
                   {t.answer.source === 'local'
                     ? <Zap className="w-3.5 h-3.5 text-emerald-400 mt-0.5 shrink-0" />
@@ -565,7 +1034,7 @@ export default function Assistant() {
         ))}
       </div>
 
-      <div className="shrink-0 border-t border-white/10">
+      <div className="shrink-0 border-t border-white/5">
         <div className="flex flex-col items-center pt-4 pb-2">
           <button
             onClick={onOrbClick}
@@ -577,14 +1046,28 @@ export default function Assistant() {
               analyser={analyser}
               active={phase === 'listening'}
               busy={phase === 'thinking' || phase === 'speaking'}
+              size={150}
             />
-            <span className="absolute inset-0 flex items-center justify-center">
-              {phase === 'thinking'
-                ? <Loader2 className="w-5 h-5 text-white/90 animate-spin" />
-                : phase === 'listening'
-                  ? <span className="w-3 h-3 rounded-sm bg-white/90" />
-                  : <Mic className="w-5 h-5 text-white/80" />}
-            </span>
+            {/*
+              The state icon sits at the BOTTOM of the sphere, not its centre.
+              Centred is where the waveform is drawn, and an opaque glyph there
+              covered the one part of this that carries information. Idle is the
+              exception — there is no trace to hide, and a microphone in the
+              middle is the clearest possible "click me".
+            */}
+            {phase === 'idle' ? (
+              <span className="absolute inset-0 flex items-center justify-center">
+                <Mic className="w-5 h-5 text-cyan-200/80" />
+              </span>
+            ) : (
+              <span className="absolute inset-x-0 bottom-1 flex items-center justify-center">
+                {phase === 'thinking'
+                  ? <Loader2 className="w-4 h-4 text-cyan-200/90 animate-spin" />
+                  : phase === 'listening'
+                    ? <span className="w-2.5 h-2.5 rounded-sm bg-cyan-200/90 animate-pulse" />
+                    : <span className="w-2.5 h-2.5 rounded-full bg-cyan-200/90" />}
+              </span>
+            )}
           </button>
 
           <div className="h-4 mt-1 text-[11px] text-gray-500 text-center px-3 truncate max-w-full">
@@ -598,14 +1081,23 @@ export default function Assistant() {
             value={input}
             onChange={(e) => setInput(e.target.value)}
             placeholder="…or type instead"
-            className="flex-1 px-3 py-2 rounded-lg bg-surface2 border border-white/10 focus:border-primary focus:outline-none text-sm"
+            className="flex-1 px-3.5 py-2.5 rounded-xl glass placeholder:text-gray-600 focus:border-cyan-400/40 focus:outline-none text-sm"
           />
           <button type="submit" disabled={busy || !input.trim()}
-            className="p-2 rounded-lg bg-primary/20 text-primary hover:bg-primary/30 disabled:opacity-40">
+            className="p-2.5 rounded-xl glass text-cyan-300 hover:border-cyan-400/40 hover:text-cyan-200 disabled:opacity-40 transition-colors">
             <Send className="w-4 h-4" />
           </button>
         </form>
       </div>
+    </div>
+
+    {/*
+      The stats rail, only when there is room for it. At the default 440px a
+      stats column would leave the conversation about 250px, which is worse
+      than showing no stats at all — so widen the window and it appears. The
+      window remembers its size now, so that is a one-time gesture.
+    */}
+    {wide && <AssistantStats />}
     </div>
   )
 }

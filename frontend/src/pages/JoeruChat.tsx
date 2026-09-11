@@ -3,7 +3,7 @@ import { motion } from 'framer-motion'
 import {
   Send, Bot, Loader2, PlugZap, Copy, Check,
   ChevronRight, Brain, Terminal, Plus, PanelLeftClose, PanelLeft, MessageSquare,
-  Square, Users,
+  Square, Users, Pencil, RotateCcw, Trash2, Search, X,
 } from 'lucide-react'
 import { api } from '@/lib/api'
 import Markdown from '@/components/Markdown'
@@ -20,6 +20,14 @@ interface Turn {
   reasoning?: string
   error?: boolean
   seconds?: number
+  /**
+   * What the turn cost, when the runner reports it.
+   *
+   * The CLI does, in its result event, and Chat was discarding it. OpenCode's
+   * free tier reports nothing, which is why this is optional rather than zero
+   * — "free" and "unknown" are different claims.
+   */
+  costUsd?: number
 }
 
 const SUGGESTIONS = [
@@ -28,12 +36,61 @@ const SUGGESTIONS = [
   'Who on the team handles database work?',
 ]
 
-/** The most useful identifying argument, whatever kind of tool this is. */
+/**
+ * Turn a CLI failure into something you can act on.
+ *
+ * The four causes have completely different fixes, and the raw message is the
+ * only thing that distinguishes them — so it is matched rather than swallowed,
+ * and kept alongside the explanation in case none of these patterns fit.
+ */
+function explainCliFailure(message: string): string {
+  const m = String(message || '')
+  if (/rate limit|429|quota|usage limit/i.test(m)) {
+    return 'Subscription quota or a rate limit — it should recover on its own shortly.'
+  }
+  // "Invalid API key · Please run /login" is the message the CLI actually
+  // gives on an expired login, and it contains none of the words below —
+  // matching only on 401/unauthorized sent the commonest auth failure to the
+  // unrecognised branch, where the advice is useless.
+  if (/not logged in|unauthor|401|403|credential|authenticate|invalid api key|\/login/i.test(m)) {
+    return 'Not authenticated. Run `claude` in a terminal once to log in.'
+  }
+  /*
+   * A safety net for a bug that is now fixed at the source.
+   *
+   * "Session ID <uuid> is already in use" meant a new session was started with
+   * an id the CLI already had a transcript for — chat() decided resume-or-not
+   * from an in-memory set that is empty on every app start, so opening a
+   * stored conversation and replying hit this every time. It now checks the
+   * filesystem instead. This branch stays because a message no pattern
+   * recognises is the one that wastes an evening.
+   */
+  if (/already in use/i.test(m)) {
+    return 'That conversation was started fresh instead of resumed. Reopen it from the list, or start a new chat.'
+  }
+  if (/agent .*not found|unknown agent|no such agent/i.test(m)) {
+    return 'That agent is not built here. Run `joeru-kit build` to write it into ~/.claude/agents.'
+  }
+  if (/ENOENT|not found|could not start/i.test(m)) {
+    return 'The Claude Code CLI is not on PATH for this process.'
+  }
+  return 'Unrecognised failure — the raw message is below.'
+}
+
+/**
+ * The most useful identifying argument, whatever kind of tool this is.
+ *
+ * Reads both spellings on purpose: OpenCode sends `filePath`, the Claude Code
+ * CLI sends `file_path`. Now that both runners feed this, checking only one
+ * would leave the summary blank for Read and Edit — the two tools where the
+ * filename is the entire point of showing the call at all.
+ */
 function describeInput(input: any): string {
   if (!input || typeof input !== 'object') return ''
   const raw =
-    input.filePath || input.path || input.pattern || input.command ||
-    input.description || input.query || ''
+    input.filePath || input.file_path || input.path || input.pattern
+    || input.command || input.description || input.query
+    || input.old_string || ''
   return String(raw).replace(/^.*[\\/]([^\\/]+)$/, '$1').slice(0, 80)
 }
 
@@ -154,6 +211,55 @@ export default function JoeruChat() {
   // would break on an upgrade. At 1s against a model that takes 1-60s, the
   // difference is invisible — and tool calls show up as they happen.
   const [live, setLive] = useState<Turn | null>(null)
+  /**
+   * Our own session id for the Claude Code CLI, distinct from the OpenCode
+   * session in `sessionId`.
+   *
+   * A ref, not state: `send` reads it in the same tick it creates it, and a
+   * state update would not have landed yet — the first turn would name a
+   * session and the second would generate a different one, so nothing would
+   * ever resume.
+   */
+  const cliSessionRef = useRef<string | null>(null)
+  /** Which runner actually answered the last turn — null until one has. */
+  /**
+   * Which row is selected, for the sidebar only.
+   *
+   * Separate from sessionId, which means specifically 'the OpenCode session'
+   * and is null whenever the CLI is answering — using it for the highlight
+   * left the open conversation unmarked in the list.
+   */
+  const [selected, setSelected] = useState<string | null>(null)
+  /** The row whose title is being edited, if any. */
+  const [renamingId, setRenamingId] = useState<string | null>(null)
+  /** Search box contents. Two characters minimum, enforced main-process side. */
+  const [query, setQuery] = useState('')
+  const [searching, setSearching] = useState(false)
+  const [runner, setRunner] = useState<'claude' | 'opencode' | null>(null)
+
+  /**
+   * Which runner the NEXT message will use, from capability detection.
+   *
+   * The indicator needs this as well as `runner`, because `runner` is only
+   * known after a turn finishes — so on a fresh chat there was nothing shown
+   * at all, and the question "am I on Claude or OpenCode right now?" had no
+   * answer until after you had already spent a turn finding out.
+   *
+   * Detection is reliable: the CLI path exists exactly when the preload bridge
+   * does, which is false in `npm run dev:web` and true in Electron. The one
+   * case where expectation and reality differ is the CLI failing mid-turn, and
+   * that corrects itself the moment the turn lands — and writes the reason
+   * into the transcript besides.
+   */
+  const expected: 'claude' | 'opencode' =
+    window.electronAPI?.claudeChat && window.electronAPI?.onClaudeChatEvent
+      ? 'claude' : 'opencode'
+
+  /** Confirmed if a turn has answered; otherwise what we expect to use. */
+  /** Why the CLI was not used, when it was tried and failed. */
+  const [fellBack, setFellBack] = useState<string | null>(null)
+
+  const shown = runner ?? expected
 
   // Default to Joeru himself. Sending no agent gets OpenCode's generic `build`
   // agent, which has no persona and no team — the chat would answer as a plain
@@ -169,7 +275,88 @@ export default function JoeruChat() {
     api.getTeam().then((r: any) => setTeam(r?.team || [])).catch(() => setTeam([]))
   }, [])
 
+  /**
+   * The conversation list, from whichever store the answers are actually in.
+   *
+   * Chat moved onto the CLI and this did not, so conversations were being
+   * saved and made unreachable — talk to one today, never find it again
+   * tomorrow, which is worse than not saving it because you would assume it
+   * was there. The CLI keeps its own transcripts and they are now the list
+   * when that path is available.
+   *
+   * Both shapes are normalised here rather than at the render site, so the
+   * sidebar does not have to know which store it is looking at.
+   */
+  /**
+   * Commit or cancel a rename.
+   *
+   * An empty value clears the stored title rather than setting a blank one,
+   * which restores the derived first-message title. That is why the input
+   * starts empty for an un-renamed conversation and shows the current title
+   * as a placeholder: typing nothing and pressing Enter is then a no-op
+   * instead of erasing the name you could see.
+   */
+  async function commitRename(id: string, value: string) {
+    setRenamingId(null)
+    const next = value.trim()
+    const row = sessions.find((s: any) => s.id === id)
+    // Nothing typed and nothing stored — nothing to do. Without this, opening
+    // and dismissing the field would issue a pointless write.
+    if (!next && !row?.renamed) return
+    if (next && next === row?.title) return
+    try {
+      await window.electronAPI?.claudeSessionRename?.(id, next)
+    } catch { /* the refresh below shows the truth either way */ }
+    await refreshSessions()
+  }
+
+  /**
+   * Delete a conversation, with a confirmation that names it.
+   *
+   * `confirm` rather than a bespoke dialog: this is destructive and
+   * irreversible — the transcript is unlinked from disk — and a native prompt
+   * is the one thing that cannot be dismissed by a stray click on the row
+   * behind it.
+   */
+  async function removeSession(id: string, title: string) {
+    const label = title && title.length > 60 ? `${title.slice(0, 57)}…` : title
+    // eslint-disable-next-line no-alert
+    if (!window.confirm(`Delete “${label}”?\n\nThis removes the transcript from disk and cannot be undone.`)) return
+
+    const res = await window.electronAPI?.claudeSessionDelete?.(id)
+    if (res && !res.removed) {
+      // Reported rather than swallowed: a delete that quietly did nothing
+      // leaves you deleting the same row repeatedly.
+      setTurns(t => [...t, {
+        role: 'assistant', error: true,
+        text: `Could not delete that conversation: ${res.error || res.reason || 'unknown reason'}`,
+      }])
+    }
+    // The open conversation was the one deleted, so stop pointing at it.
+    if (id === selected) {
+      setSelected(null)
+      setTurns([])
+      if (cliSessionRef.current === id) cliSessionRef.current = null
+      setRunner(null)
+    }
+    await refreshSessions()
+  }
+
   async function refreshSessions() {
+    const cli = window.electronAPI?.claudeSessions
+    if (cli) {
+      try {
+        const rows = await cli()
+        setSessions((rows || []).map((r) => ({
+          id: r.id,
+          title: r.title,
+          time: { updated: r.updated },
+          runner: 'claude' as const,
+        })))
+        return
+      } catch { /* fall through to OpenCode rather than showing nothing */ }
+    }
+
     try {
       const { sessions: all } = await api.joeruSessions()
       // Root sessions only — subagent runs are steps inside a conversation,
@@ -177,19 +364,122 @@ export default function JoeruChat() {
       setSessions(
         (all || [])
           .filter((s: any) => !s.parentID)
-          .sort((a: any, b: any) => (b.time?.updated || 0) - (a.time?.updated || 0)),
+          .sort((a: any, b: any) => (b.time?.updated || 0) - (a.time?.updated || 0))
+          .map((s: any) => ({ ...s, runner: 'opencode' as const })),
       )
     } catch { /* server down — the health panel already says so */ }
   }
 
   useEffect(() => { refreshSessions() }, [health?.running])
 
-  /** Load a past conversation, including ones started in the OpenCode TUI. */
+  /**
+   * Run the search, debounced, and put the results in the list.
+   *
+   * Debounced because each keystroke would otherwise read every transcript in
+   * the directory. 250ms is below the point where typing feels laggy and above
+   * the rate at which anyone types.
+   *
+   * `alive` guards the write: a slow query for "pack" must not overwrite the
+   * results for "package" that were requested after it and returned first.
+   * Out-of-order responses are the classic search bug and they look like the
+   * filter simply not working.
+   */
+  useEffect(() => {
+    const q = query.trim()
+    const find = window.electronAPI?.claudeSessionSearch
+    if (!find || q.length < 2) {
+      setSearching(false)
+      // Clearing the box restores the full list rather than leaving the last
+      // result set stranded there.
+      if (q.length === 0) refreshSessions()
+      return
+    }
+
+    let alive = true
+    setSearching(true)
+    const timer = window.setTimeout(async () => {
+      try {
+        const hits = await find(q)
+        if (!alive) return
+        setSessions((hits || []).map((h) => ({
+          id: h.id,
+          title: h.title,
+          snippet: h.snippet,
+          matches: h.matches,
+          time: { updated: h.updated },
+          runner: 'claude' as const,
+        })))
+      } catch {
+        if (alive) setSessions([])
+      } finally {
+        if (alive) setSearching(false)
+      }
+    }, 250)
+
+    return () => { alive = false; window.clearTimeout(timer) }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query])
+
+  /**
+   * Load a past conversation, including ones started in the OpenCode TUI.
+   *
+   * KNOWN LIMITATION, stated rather than hidden: these are OpenCode
+   * transcripts, and the Claude Code CLI has never seen them. Reading one back
+   * and then sending a message starts a FRESH CLI conversation — what is on
+   * screen above your question is history the answering model does not have.
+   *
+   * The CLI session is cleared here deliberately so that at least the
+   * behaviour is predictable: a new conversation, not the previous CLI
+   * conversation wearing someone else's transcript. Bridging the two would
+   * mean replaying an OpenCode history into a CLI session, which is real work
+   * and not worth it while these old sessions hold nothing important.
+   */
   async function openSession(id: string) {
-    if (id === sessionId || sending) return
+    if (id === selected || sending) return
+    setSelected(id)
     setLoadingHistory(true)
-    setSessionId(id)
+    setFellBack(null)
     setTurns([])
+
+    /*
+     * A CLI conversation is RESUMED, not merely displayed.
+     *
+     * This is what makes the list worth having: the id becomes the live
+     * session, so the next thing you send continues where it left off instead
+     * of starting fresh with the old messages sitting uselessly above it.
+     */
+    const row = sessions.find((s: any) => s.id === id)
+    if (row?.runner === 'claude' && window.electronAPI?.claudeSessionRead) {
+      setSessionId(null)
+      cliSessionRef.current = id
+      setRunner('claude')
+      try {
+        const { turns: restored, error } = await window.electronAPI.claudeSessionRead(id)
+        if (error) throw new Error(error)
+        setTurns((restored || []).map((t) => ({
+          role: t.role,
+          text: t.text,
+          tools: (t.tools || []).map((x) => ({
+            tool: x.name, status: 'completed', summary: describeInput(x.input),
+          })),
+        })))
+      } catch (err: any) {
+        setTurns([{
+          role: 'assistant', error: true,
+          text: `Could not read that conversation: ${err.message}`,
+        }])
+      } finally {
+        setLoadingHistory(false)
+      }
+      return
+    }
+
+    setSessionId(id)
+    if (cliSessionRef.current) {
+      window.electronAPI?.claudeChatForget?.(cliSessionRef.current)
+      cliSessionRef.current = null
+    }
+    setRunner(null)
     try {
       const { messages } = await api.joeruMessages(id)
       const restored: Turn[] = []
@@ -210,6 +500,19 @@ export default function JoeruChat() {
 
   function newChat() {
     setSessionId(null)
+    /*
+     * Drop the CLI session too, or "new chat" would clear the transcript on
+     * screen and then resume the old conversation underneath it — the worst
+     * version of this bug, because the history you cannot see is the history
+     * still being answered from.
+     */
+    if (cliSessionRef.current) {
+      window.electronAPI?.claudeChatForget?.(cliSessionRef.current)
+      cliSessionRef.current = null
+    }
+    setRunner(null)
+    setFellBack(null)
+    setSelected(null)
     setTurns([])
     inputRef.current?.focus()
   }
@@ -249,9 +552,88 @@ export default function JoeruChat() {
     return () => { cancelled = true; clearInterval(t) }
   }, [sending, sessionId])
 
+  /**
+   * Stop whichever runner is actually working.
+   *
+   * This was broken the moment Chat moved onto the CLI: it required
+   * `sessionId`, which is the OPENCODE session, and on the CLI path that stays
+   * null because no OpenCode session is ever created. So the button rendered,
+   * you pressed it, and nothing happened — on turns that can run for minutes
+   * against a ten-minute timeout. A visible control that silently does nothing
+   * is worse than no control.
+   */
   async function stop() {
+    const cliId = cliSessionRef.current
+    if (cliId && window.electronAPI?.claudeChatCancel) {
+      const stopped = await window.electronAPI.claudeChatCancel(cliId)
+      if (stopped) return
+      // Nothing was in flight for the CLI — fall through in case the OpenCode
+      // fallback is the one currently running.
+    }
     if (!sessionId) return
     try { await api.joeruAbort(sessionId) } catch { /* already finished */ }
+  }
+
+  /**
+   * Ask the last question again, differently.
+   *
+   * Called "retry", not "regenerate", because with a persistent session that
+   * is what it honestly is. The CLI session already holds the question AND the
+   * answer, and there is no rewind — `--fork-session` continues from the
+   * current point rather than unwinding to an earlier one. So this cannot
+   * discard the previous answer the way ChatGPT's regenerate does; it asks
+   * again with an explicit instruction not to repeat itself.
+   *
+   * That is worth stating in the tooltip rather than hiding, because the
+   * difference is visible: the model has seen its own last attempt, which
+   * usually helps and occasionally anchors it.
+   */
+  async function retry() {
+    if (sending) return
+    const lastUser = [...turns].reverse().find((t) => t.role === 'user')
+    if (!lastUser) return
+    // Drop the answer being replaced from the view. The session still has it;
+    // this is the transcript, not the context.
+    setTurns((t) => {
+      const out = [...t]
+      while (out.length && out[out.length - 1].role === 'assistant') out.pop()
+      return out
+    })
+    await send(
+      'Answer my previous question again, and differently — take another '
+      + 'approach rather than restating your last answer. The question was: '
+      + lastUser.text,
+      { silent: true },
+    )
+  }
+
+  /**
+   * Put a previous message back in the box, and forget everything after it.
+   *
+   * Editing means the original question was wrong, so continuing the same
+   * session would leave the mistake in context and the model would keep
+   * seeing it. This starts a FRESH session: the turns before the edited one
+   * stay on screen as history you can read, but the new session has not seen
+   * them, and the header says `claude code · expected` again to make that
+   * visible rather than silent.
+   *
+   * A deliberate trade. Replaying the earlier turns into the new session would
+   * preserve context and cost a full re-send of the transcript, which is the
+   * expense sessions exist to avoid.
+   */
+  function editFrom(index: number) {
+    if (sending) return
+    const turn = turns[index]
+    if (!turn || turn.role !== 'user') return
+
+    setDraft(turn.text)
+    setTurns(turns.slice(0, index))
+    if (cliSessionRef.current) {
+      window.electronAPI?.claudeChatForget?.(cliSessionRef.current)
+      cliSessionRef.current = null
+    }
+    setRunner(null)
+    inputRef.current?.focus()
   }
 
   function grow(el: HTMLTextAreaElement) {
@@ -259,17 +641,126 @@ export default function JoeruChat() {
     el.style.height = `${Math.min(el.scrollHeight, 200)}px`
   }
 
-  async function send(preset?: string) {
+  async function send(preset?: string, opts?: { silent?: boolean }) {
     const text = (preset ?? draft).trim()
     if (!text || sending) return
 
     setDraft('')
     if (inputRef.current) inputRef.current.style.height = 'auto'
-    setTurns(t => [...t, { role: 'user', text }])
+    /*
+     * `silent` sends without adding a user bubble.
+     *
+     * Retry needs it: the question is already on screen above the answer being
+     * replaced, and the instruction actually sent ("answer again, differently
+     * — the question was …") is scaffolding, not something you typed. Showing
+     * it would put words in your mouth in your own transcript.
+     */
+    if (!opts?.silent) setTurns(t => [...t, { role: 'user', text }])
     setSending(true)
 
     const started = Date.now()
     try {
+      /*
+       * The Claude Code CLI first, OpenCode as the fallback.
+       *
+       * Same runner as Assistant Mode, but with two differences that matter
+       * here: the conversation lives in the CLI's own session store, so a
+       * follow-up costs a fraction of the first turn rather than re-sending
+       * the transcript (measured: $0.1402 then $0.0072), and no model is
+       * pinned — the agent's declared tier applies, so joeru answers on opus
+       * and frontend-engineer on sonnet.
+       *
+       * The fallback is not defensive padding. `npm run dev:web` serves this
+       * same page in a browser with no electronAPI at all, and that is the
+       * only path that works there.
+       */
+      const api2 = window.electronAPI
+      if (api2?.claudeChat && api2?.onClaudeChatEvent) {
+        if (!cliSessionRef.current) cliSessionRef.current = crypto.randomUUID()
+        const cliId = cliSessionRef.current
+
+        const tools: ToolCall[] = []
+        let streamed = ''
+        let turnCost: number | null = null
+        let thinking = ''
+        // Subscribed for the turn only, and unsubscribed in `finally` —
+        // leaving it attached would report the same Read once per turn sent.
+        const off = api2.onClaudeChatEvent((e) => {
+          if (e.sessionId !== cliId) return
+          if (e.type === 'tool') {
+            tools.push({ tool: e.name ?? 'tool', status: 'running', summary: describeInput(e.input) })
+          } else if (e.type === 'text' && e.text) {
+            streamed += e.text
+          } else if (e.type === 'reasoning' && e.text) {
+            // The CLI emits thinking deltas and this path was dropping them —
+            // reasoning only ever showed on the OpenCode side.
+            thinking += e.text
+          } else if (e.type === 'done') {
+            // The CLI prices every turn and Chat was discarding it. Showing it
+            // costs nothing, and on a subscription already well past its
+            // budget it is the number worth having in front of you.
+            turnCost = e.costUsd ?? null
+          }
+          setLive({
+            role: 'assistant', text: streamed, tools: [...tools],
+            reasoning: thinking || undefined,
+          })
+        })
+
+        let result
+        try {
+          result = await api2.claudeChat({ sessionId: cliId, agent: agent || undefined, text })
+        } finally {
+          off()
+        }
+
+        if (!result.error) {
+          setRunner('claude')
+          setTurns(t => [...t, {
+            role: 'assistant',
+            text: result.text || '_(no text in reply)_',
+            tools: result.tools.map((x) => ({
+              tool: x.name, status: 'completed', summary: describeInput(x.input),
+            })),
+            seconds: Math.round((Date.now() - started) / 1000),
+            costUsd: turnCost ?? undefined,
+            reasoning: thinking || undefined,
+          }])
+          return
+        }
+
+        /*
+         * The CLI failed. Say so in three places, because a silent downgrade
+         * is the failure that wastes your time: the answer that follows comes
+         * from a different model with different capabilities — OpenCode cannot
+         * write files at all — and it must not look like a normal reply.
+         *
+         * The raw CLI message is kept rather than summarised. "Claude Code
+         * could not answer" tells you nothing actionable; the actual text
+         * distinguishes a quota limit from an expired login from an agent that
+         * was never built, and those have completely different fixes.
+         */
+        // Held in a local so the narrowing survives the closure below — the
+        // setTurns callback runs later, where TypeScript can no longer prove
+        // result.error is set.
+        const raw = result.error ?? 'no reason reported'
+        const why = explainCliFailure(raw)
+
+        setRunner('opencode')
+        setFellBack(why)
+        setTurns(t => [...t, {
+          role: 'assistant',
+          error: true,
+          text: `**Claude Code could not answer.** ${why}\n\n`
+            + 'Falling back to OpenCode — free tier, and it cannot edit files.\n\n'
+            + `<sub>${raw}</sub>`,
+          // Timed like any other turn, and it matters most here: the CLI
+          // timeout is ten minutes, so "how long did that cost me before it
+          // gave up" is exactly what you want to see on a failure.
+          seconds: Math.round((Date.now() - started) / 1000),
+        }])
+      }
+
       let id = sessionId
       if (!id) {
         // Title it after the first thing asked, so the list is scannable.
@@ -279,6 +770,7 @@ export default function JoeruChat() {
 
       const reply = await api.joeruSend(id!, text, agent || undefined)
       const { text: replyText, tools, reasoning } = readParts(reply?.parts)
+      setRunner('opencode')
       setTurns(t => [...t, {
         role: 'assistant',
         text: replyText || '_(no text in reply)_',
@@ -330,29 +822,130 @@ export default function JoeruChat() {
             </button>
           </div>
 
+          {/* Search, only where there is a store to search. OpenCode exposes
+              no full-text endpoint over its sessions, so offering the box on
+              that path would be a control that never returns anything. */}
+          {window.electronAPI?.claudeSessionSearch && (
+            <div className="px-2 pb-2">
+              <div className="relative">
+                <Search className="w-3 h-3 absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-600" />
+                <input
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder="Search conversations"
+                  className="w-full pl-7 pr-7 py-1.5 rounded-lg bg-white/[0.04] border border-white/10
+                             text-[11px] placeholder:text-gray-600 focus:border-white/25 focus:outline-none"
+                />
+                {query && (
+                  <button
+                    onClick={() => setQuery('')}
+                    title="Clear"
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-600 hover:text-gray-300"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                )}
+              </div>
+              {query.trim().length === 1 && (
+                <p className="text-[10px] text-gray-600 mt-1 px-0.5">Two characters minimum.</p>
+              )}
+            </div>
+          )}
+
           <div className="flex-1 overflow-y-auto px-2 pb-2 space-y-0.5">
-            {sessions.length === 0 && (
-              <p className="text-[11px] text-gray-600 px-2 py-3">No conversations yet.</p>
+            {searching && (
+              <p className="text-[11px] text-gray-600 px-2 py-3 flex items-center gap-1.5">
+                <Loader2 className="w-3 h-3 animate-spin" /> searching…
+              </p>
+            )}
+            {!searching && sessions.length === 0 && (
+              <p className="text-[11px] text-gray-600 px-2 py-3">
+                {query.trim().length >= 2 ? `Nothing matches “${query.trim()}”.` : 'No conversations yet.'}
+              </p>
             )}
             {sessions.map(s => (
-              <button key={s.id} onClick={() => openSession(s.id)}
-                className={`w-full text-left px-2.5 py-2 rounded-lg transition-colors group ${
-                  s.id === sessionId ? 'bg-white/[0.07]' : 'hover:bg-white/[0.03]'
+              /*
+                A div, not a button. The row holds rename and delete controls,
+                and a button inside a button is invalid HTML — the browser
+                un-nests it and the inner control stops receiving clicks. The
+                title is the clickable element instead.
+              */
+              <div key={s.id}
+                className={`px-2.5 py-2 rounded-lg transition-colors group ${
+                  s.id === selected ? 'bg-white/[0.07]' : 'hover:bg-white/[0.03]'
                 }`}>
                 <div className="flex items-center gap-1.5">
                   <MessageSquare className={`w-3 h-3 shrink-0 ${
-                    s.id === sessionId ? 'text-indigo-300' : 'text-gray-600'
+                    s.id === selected ? 'text-indigo-300' : 'text-gray-600'
                   }`} />
-                  <span className={`text-[12px] truncate ${
-                    s.id === sessionId ? 'text-gray-100' : 'text-gray-400 group-hover:text-gray-300'
-                  }`}>
-                    {s.title || s.slug || 'Untitled'}
-                  </span>
+
+                  {renamingId === s.id ? (
+                    <input
+                      autoFocus
+                      defaultValue={s.renamed ? s.title : ''}
+                      placeholder={s.title}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') commitRename(s.id, e.currentTarget.value)
+                        if (e.key === 'Escape') setRenamingId(null)
+                      }}
+                      // Committing on blur as well as Enter, because clicking
+                      // away is what people do and losing the typing there
+                      // reads as the feature not working.
+                      onBlur={(e) => commitRename(s.id, e.currentTarget.value)}
+                      className="flex-1 min-w-0 bg-black/30 border border-white/20 rounded px-1.5 py-0.5
+                                 text-[12px] text-gray-100 focus:outline-none focus:border-indigo-400/50"
+                    />
+                  ) : (
+                    <>
+                      <button
+                        onClick={() => openSession(s.id)}
+                        className={`flex-1 min-w-0 text-left text-[12px] truncate ${
+                          s.id === selected ? 'text-gray-100' : 'text-gray-400 group-hover:text-gray-300'
+                        }`}
+                      >
+                        {s.title || s.slug || 'Untitled'}
+                      </button>
+
+                      {/* Actions only for the CLI store — an OpenCode session
+                          has no rename or delete behind it, and a control that
+                          silently does nothing is worse than an absent one. */}
+                      {s.runner === 'claude' && (
+                        <span className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                          <button
+                            onClick={() => setRenamingId(s.id)}
+                            title={s.renamed ? 'Rename — empty restores the original' : 'Rename'}
+                            className="p-0.5 text-gray-600 hover:text-gray-200"
+                          >
+                            <Pencil className="w-3 h-3" />
+                          </button>
+                          <button
+                            onClick={() => removeSession(s.id, s.title)}
+                            title="Delete this conversation permanently"
+                            className="p-0.5 text-gray-600 hover:text-red-400"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </button>
+                        </span>
+                      )}
+                    </>
+                  )}
                 </div>
-                <span className="text-[10px] text-gray-700 pl-4.5 ml-0.5">
+
+                <button
+                  onClick={() => openSession(s.id)}
+                  className="block w-full text-left text-[10px] text-gray-700 pl-4.5 ml-0.5"
+                >
                   {relativeTime(s.time?.updated)}
-                </span>
-              </button>
+                  {s.matches ? ` · ${s.matches} match${s.matches === 1 ? '' : 'es'}` : ''}
+                </button>
+
+                {/* Why it matched, when searching. */}
+                {s.snippet && (
+                  <p className="text-[10px] text-gray-600 pl-4.5 ml-0.5 mt-0.5 line-clamp-2">
+                    {s.snippet}
+                  </p>
+                )}
+              </div>
             ))}
           </div>
         </aside>
@@ -370,6 +963,35 @@ export default function JoeruChat() {
           <span className="text-[11px] text-gray-600">
             {health?.running ? 'connected' : 'connecting…'}
           </span>
+          {/*
+            Which runner answered. Worth showing because the fallback changes
+            more than speed: OpenCode answers on a different model AND, since
+            it cannot write, with different capabilities. An answer that
+            silently came from the backup should not look like one that did not.
+          */}
+          <span
+            title={shown === 'claude'
+              ? "Claude Code CLI — the agent's own model tier, persistent session, can edit files"
+              : fellBack
+                ? `Fell back to OpenCode: ${fellBack}`
+                : 'OpenCode — free tier, read-only tools. The Claude Code bridge is not available here.'}
+            className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
+              shown === 'claude'
+                ? 'bg-violet-500/15 text-violet-300'
+                : 'bg-amber-500/15 text-amber-300'
+            }`}
+          >
+            {shown === 'claude' ? 'claude code' : 'opencode'}
+            {/* An unconfirmed label is marked, so "claude code" before the
+                first answer cannot be mistaken for a runner that has actually
+                replied. */}
+            {!runner && <span className="opacity-50"> · expected</span>}
+          </span>
+          {fellBack && (
+            <span title={fellBack} className="text-[10px] text-amber-400/70">
+              claude unavailable
+            </span>
+          )}
           {loadingHistory && <Loader2 className="w-3 h-3 animate-spin text-gray-600" />}
         </div>
 
@@ -400,7 +1022,19 @@ export default function JoeruChat() {
           {turns.map((t, i) =>
             t.role === 'user' ? (
               <motion.div key={i} initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }}
-                className="flex justify-end">
+                className="flex justify-end items-start gap-1.5 group">
+                {/* Edit appears on hover only. A destructive-looking control
+                    sitting permanently beside every message you ever sent is
+                    noise, and this one discards the turns after it. */}
+                <button
+                  onClick={() => editFrom(i)}
+                  disabled={sending}
+                  title="Edit this message — drops everything after it and starts a fresh session"
+                  className="opacity-0 group-hover:opacity-100 transition-opacity mt-2
+                             text-gray-600 hover:text-gray-300 disabled:opacity-0"
+                >
+                  <Pencil className="w-3 h-3" />
+                </button>
                 <div className="max-w-[80%] px-4 py-2.5 rounded-2xl rounded-br-md text-sm
                                 bg-indigo-500/15 border border-indigo-500/25 whitespace-pre-wrap break-words">
                   {t.text}
@@ -431,7 +1065,35 @@ export default function JoeruChat() {
                     {t.seconds !== undefined && (
                       <span className="text-[10px] text-gray-600 tabular-nums">{t.seconds}s</span>
                     )}
+                    {/*
+                      The per-turn dollar figure used to render here.
+
+                      Unlike the dashboard's cost metrics it was accurate — the
+                      CLI reports `total_cost_usd` itself, rather than pricing
+                      tokens at a flat guessed rate. It is gone anyway, because
+                      it measures money that a subscription does not spend
+                      per-turn, and a real number answering the wrong question
+                      is still the wrong number to show.
+
+                      `costUsd` is still captured on the turn, so putting this
+                      back is a display change and nothing more.
+                    */}
                     <CopyButton text={t.text} />
+                    {/* Only on the newest answer: retrying an older one would
+                        ask the question again at the end of a conversation
+                        that has since moved on, and the reply would land in
+                        the wrong place. */}
+                    {i === turns.length - 1 && !t.error && (
+                      <button
+                        onClick={retry}
+                        disabled={sending}
+                        title="Ask again, differently. The session keeps the previous answer in context — there is no rewind."
+                        className="opacity-0 group-hover:opacity-100 transition-opacity
+                                   text-gray-600 hover:text-gray-300 disabled:opacity-30"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5" />
+                      </button>
+                    )}
                   </div>
                 </div>
               </motion.div>

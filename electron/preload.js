@@ -34,6 +34,58 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // using the existing login rather than an API key.
   claudeAsk: (question) => ipcRenderer.invoke('claude-ask', question),
   claudeCancel: () => ipcRenderer.invoke('claude-cancel'),
+  /**
+   * Start a fresh Assistant Mode conversation. Resolves with the new session
+   * id and the one it replaced — the old conversation is kept, so the Chat tab
+   * can still open it.
+   */
+  assistantNewConversation: () => ipcRenderer.invoke('assistant-new-conversation'),
+  /** Which conversation Assistant Mode is in, or null before the first question. */
+  assistantSession: () => ipcRenderer.invoke('assistant-session'),
+  /**
+   * Tool activity for the answer in flight. Returns an unsubscribe function —
+   * without one, every mount adds another listener and one Read is reported
+   * as many times as the window has been opened.
+   */
+  onClaudeAskEvent: (cb) => {
+    const handler = (_e, payload) => cb(payload);
+    ipcRenderer.on('claude-ask-event', handler);
+    return () => ipcRenderer.removeListener('claude-ask-event', handler);
+  },
+
+  // The Chat tab on the same CLI, but with a persistent session and the
+  // agent's own model tier rather than a pinned fast one.
+  claudeChat: (args) => ipcRenderer.invoke('claude-chat', args),
+  claudeSessions: () => ipcRenderer.invoke('claude-sessions'),
+  claudeSessionRead: (id) => ipcRenderer.invoke('claude-session-read', id),
+  claudeSessionRename: (id, title) => ipcRenderer.invoke('claude-session-rename', { id, title }),
+  claudeSessionDelete: (id) => ipcRenderer.invoke('claude-session-delete', id),
+  claudeSessionSearch: (query) => ipcRenderer.invoke('claude-session-search', query),
+  claudeChatCancel: (sessionId) => ipcRenderer.invoke('claude-chat-cancel', sessionId),
+  claudeChatForget: (sessionId) => ipcRenderer.invoke('claude-chat-forget', sessionId),
+  // Real subscription usage (5-hour and weekly windows). Observed from calls
+  // already being made, so this is a cheap read and never itself spends quota.
+  claudeUsage: () => ipcRenderer.invoke('claude-usage'),
+  /**
+   * Fires the moment a new reading is recorded, so the bars move with the
+   * answer rather than on the next poll. Returns an unsubscribe function —
+   * without one, every mount would add another listener.
+   */
+  onClaudeUsageUpdate: (cb) => {
+    const handler = (_e, payload) => cb(payload);
+    ipcRenderer.on('claude-usage-update', handler);
+    return () => ipcRenderer.removeListener('claude-usage-update', handler);
+  },
+  /**
+   * Subscribe to tool activity for the turn in flight. Returns an unsubscribe
+   * function — without one, every mount would add another listener and the
+   * same Read would be reported as many times as the page had been opened.
+   */
+  onClaudeChatEvent: (cb) => {
+    const handler = (_e, payload) => cb(payload);
+    ipcRenderer.on('claude-chat-event', handler);
+    return () => ipcRenderer.removeListener('claude-chat-event', handler);
+  },
 
   // Fire-and-forget: logging must never delay an answer.
   logQuestion: (entry) => ipcRenderer.send('assistant-log', entry),
