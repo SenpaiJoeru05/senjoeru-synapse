@@ -32,7 +32,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Assistant Mode's answering brain — the Claude Code CLI in print mode,
   // using the existing login rather than an API key.
-  claudeAsk: (question) => ipcRenderer.invoke('claude-ask', question),
+  /**
+   * Ask within Assistant Mode's session.
+   *
+   * `prompt` is the grounded text; `question` is what the user actually said,
+   * and is used only to choose the model — the grounded prompt mentions tasks
+   * and git every turn, so routing on it would escalate everything to Opus.
+   * A bare string still works and routes on whatever it is given.
+   */
+  claudeAsk: (prompt, question) => ipcRenderer.invoke(
+    'claude-ask',
+    question === undefined ? prompt : { prompt, question },
+  ),
   claudeCancel: () => ipcRenderer.invoke('claude-cancel'),
   /**
    * Start a fresh Assistant Mode conversation. Resolves with the new session

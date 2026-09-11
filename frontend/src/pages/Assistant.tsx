@@ -239,6 +239,7 @@ export default function Assistant() {
    */
   const [caption, setCaption] = useState('')
 
+
   /**
    * Whether the conversation log is showing.
    *
@@ -710,8 +711,17 @@ export default function Assistant() {
 
           let answer: string
           try {
+            /*
+             * The grounded prompt AND the raw question.
+             *
+             * The second is only for choosing the model: the grounded text
+             * names tasks, attention, usage and git on every turn, so routing
+             * on it would send every question to Opus and remove the saving
+             * the routing exists for.
+             */
             answer = (await window.electronAPI.claudeAsk(
               ground(q, state, recentRef.current),
+              q,
             )).trim()
           } finally {
             off?.()

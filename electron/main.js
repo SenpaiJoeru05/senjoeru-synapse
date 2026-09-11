@@ -324,7 +324,21 @@ function nameAssistantSession(id) {
 
 // Assistant Mode's answering brain. Triggered by the user — the same thing as
 // typing `claude -p` in a terminal, continuing one session.
-ipcMain.handle('claude-ask', async (event, question) => {
+ipcMain.handle('claude-ask', async (event, payload) => {
+  /*
+   * Accepts either a bare prompt or { prompt, question }.
+   *
+   * The second form exists because the model is chosen from what the user
+   * actually said, and the prompt the renderer sends is the GROUNDED one —
+   * state block, memory index, rules. That text names tasks, attention, usage
+   * and git on every single turn, so routing on it would escalate every
+   * question to Opus and defeat the saving entirely.
+   *
+   * The bare-string form is still honoured so a renderer built before this
+   * change keeps working; it just routes on the grounded text.
+   */
+  const prompt = typeof payload === 'string' ? payload : payload?.prompt;
+  const rawQuestion = typeof payload === 'string' ? null : payload?.question ?? null;
   /*
    * Tool activity is pushed while the answer is being worked out.
    *
@@ -342,7 +356,7 @@ ipcMain.handle('claude-ask', async (event, question) => {
   const fresh = !assistantSession.started();
   const sessionId = assistantSession.current();
 
-  const answer = await claude.ask(question, send, sessionId);
+  const answer = await claude.ask(prompt, send, sessionId, rawQuestion);
   if (fresh) nameAssistantSession(sessionId);
   return answer;
 });

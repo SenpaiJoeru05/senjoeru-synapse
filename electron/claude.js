@@ -25,16 +25,63 @@ const usage = require('../shared/usage-store');
 const { resumeFlags } = require('../shared/assistant-session');
 
 /**
- * Model for one-shot questions. Startup dominates the latency (measured ~5.5s
- * of ~6.4s), so a bigger model buys little speed back — but it does cost more
- * quota, and these questions do not need it.
+ * What Joeru runs on.
  *
- * This also overrides the agent's own declared model. joeru.md is built with
- * `model: opus` (targets.json maps his `deep` tier there), and --model wins —
- * verified: asked on this configuration he replies "I'm Joeru … running on
- * Claude Haiku 4.5".
+ * Overrides his own declared model: joeru.md is built with `model: opus`
+ * (targets.json maps his `deep` tier there) and --model wins — verified, he
+ * replies "I'm Joeru … running on Claude Haiku 4.5". See the note below for
+ * why the dispatcher should be the cheap one.
  */
 const MODEL = 'haiku';
+
+/*
+ * WHY JOERU IS PINNED CHEAP, AND WHY THAT IS NOT A COMPROMISE
+ *
+ * His own definition: "Delegate with the task tool. Never do a specialist's
+ * job yourself", and "Multi-repo or multi-specialist → hand the whole thing to
+ * Rafael. Don't hand-orchestrate what he does better."
+ *
+ * So Joeru does three things — pick the right specialist, answer a trivial
+ * lookup, and remember. All three are classification and recall, which is what
+ * Haiku is good at. He does not plan (project-manager does, on opus), fix
+ * (the engineers do, on sonnet), or test (qa-engineer does). Running the
+ * DISPATCHER on the most expensive model is paying Opus rates to choose a
+ * name from a table.
+ *
+ * Measured, identical trivial question, fresh session each:
+ *
+ *   haiku        $0.03332   6.8s
+ *   opus (high)  $0.12274   5.4s
+ *
+ * 3.7x for a one-line answer, and not even faster — startup dominates at this
+ * size. On a subscription the dollars are notional; the real currency is the
+ * 5-hour and 7-day windows, which Opus drains several times quicker.
+ *
+ * This briefly had per-question escalation instead — Opus for "fix this bug",
+ * Haiku for "what's the status". That was solving the wrong problem: it made
+ * Joeru a better generalist rather than letting him hand the job to the
+ * specialist whose prompt and model already fit it. Once Task was granted, the
+ * escalation was pure cost.
+ *
+ * The important part: this pins JOERU, not the team. A specialist chosen in
+ * Chat keeps its own declared tier (see modelFor), and a subagent Joeru spawns
+ * runs on whatever its own definition says — sonnet for the engineers, opus
+ * for project-manager, flow-analyst and security-reviewer. Delegation is what
+ * picks the right brain, which is exactly how the roster was designed.
+ */
+
+/**
+ * The model flags for one agent.
+ *
+ * Joeru is pinned to the cheap model for the reasons above. Anyone else gets
+ * NO --model at all, so the tier declared in their own definition applies —
+ * pinning them would override the roster's whole point, and would put the
+ * backend engineer on Haiku.
+ */
+function modelFor(agent) {
+  const who = String(agent || AGENT).trim();
+  return who === AGENT ? ['--model', MODEL] : [];
+}
 
 /**
  * The persona. Without this the CLI answers as plain Claude — "You're talking
@@ -108,9 +155,11 @@ const TIMEOUT_MS = 90_000;
  * to be the one who files what he learns. Glob and Grep let him find the right
  * memory file instead of guessing a path.
  *
- * Bash and Task are deliberately NOT granted. A voice window answering
- * unattended should not be able to run shell commands or spawn subagents on a
- * misheard sentence, and neither is needed to write a memory file.
+ * Bash and Task WERE withheld here, on the reasoning that a voice window
+ * answering unattended should not run shell commands or spawn subagents on a
+ * misheard sentence. That turned out to cost more than it bought, and the
+ * reasoning was partly mistaken — see GIT_TOOLS, VERIFY_TOOLS and TEAM_TOOLS
+ * below for what was measured and what replaced it.
  *
  * Note what the safety net is NOT: memory writes are invisible to git here.
  * `memory/` is gitignored for new files and the tracked ones carry
@@ -179,8 +228,98 @@ const GIT_TOOLS = [
   'Bash(git checkout:*)',
 ];
 
-/** Everything the CLI may use here: files, search, and scoped git. */
-const GRANTED_TOOLS = [...ALLOWED_TOOLS, ...GIT_TOOLS];
+/**
+ * Verification — the difference between "I edited it" and "the tests pass".
+ *
+ * This is what made the specialists useless. `--allowedTools` CASCADES to
+ * subagents, so every agent Joeru spawns inherits this list rather than its
+ * own declared one. Measured: asked to run one test file, the frontend
+ * engineer subagent was rejected three times with "This command requires
+ * approval."
+ *
+ * Eight of the twelve agents declare `Bash`, and for one of them it is the
+ * entire job — qa-engineer is "writes and runs tests, verifies behavior", and
+ * without a shell it can read test files and nothing else.
+ *
+ * Scoped rather than bare `Bash`, but stated honestly: this is a speed bump,
+ * not a boundary. `npm run` executes whatever is in package.json, so a
+ * determined or confused agent is not contained by this list. The real
+ * containment is the DIRECTORY scope — cwd plus --add-dir — which is what
+ * actually refused the file writes when that was measured. What this does buy
+ * is that `git push` stays out of reach, which bare `Bash` would hand back.
+ */
+const VERIFY_TOOLS = [
+  'Bash(node --test:*)',
+  'Bash(npm run:*)',
+  'Bash(npm test:*)',
+  'Bash(npx tsc:*)',
+  'Bash(npx vitest:*)',
+];
+
+/**
+ * Delegation and research.
+ *
+ * `Task` is the one that changes what this product is. Without it Joeru is
+ * told to route work — "Delegate with the task tool. Never do a specialist's
+ * job yourself" — and cannot, so he either does it himself badly or narrates a
+ * handoff that never happened. Both were observed.
+ *
+ * `TodoWrite` because project-manager declares it and cannot track a plan
+ * without it. WebSearch/WebFetch because "what is the latest version of X" is
+ * otherwise answered from a training cutoff.
+ */
+const TEAM_TOOLS = ['Task', 'TodoWrite', 'WebSearch', 'WebFetch'];
+
+/** Everything the CLI may use here — and everything a subagent inherits. */
+const GRANTED_TOOLS = [
+  ...ALLOWED_TOOLS, ...GIT_TOOLS, ...VERIFY_TOOLS, ...TEAM_TOOLS,
+];
+
+/**
+ * What he can and cannot actually do here — stated, because he gets it wrong.
+ *
+ * THE FAILURE THIS FIXES
+ *
+ * joeru.md declares `tools: Read, Edit, Write, Grep, Glob, Bash, TodoWrite,
+ * Task` and his whole persona is about routing work to specialists. Synapse
+ * passes --allowedTools WITHOUT Task, and --allowedTools restricts. So he is
+ * instructed to delegate and has no way to.
+ *
+ * He does not notice. Measured:
+ *
+ *   asked "can you spawn a subagent right now?"  -> "Yes - I have the Agent tool."
+ *   asked to route a frontend job                -> discussed routing it to
+ *                                                   Sophia, called zero tools
+ *
+ * The first answer is simply false. This is the same mechanism behind the
+ * earlier incident where he reported work "already finished by Sophia" when no
+ * task, no code and no commit existed — he is told he routes work, cannot, and
+ * narrates it instead. A confident false claim about his own capabilities is
+ * worse than a refusal, because it is indistinguishable from success.
+ *
+ * The fix is to tell him the truth about this session rather than to remove
+ * the routing persona, which is correct everywhere else he runs — in a
+ * terminal, where joeru.md's own tool list applies, he really can delegate.
+ */
+const CAPABILITY_NOTE = [
+  'WHAT YOU CAN ACTUALLY DO IN THIS SESSION:',
+  'Files: Read, Write, Edit, Glob, Grep.',
+  'Git by subcommand: status, diff, log, show, branch, remote, rev-parse, add,',
+  'commit, restore, stash, switch, checkout. You can inspect the repo and',
+  'commit. You CANNOT push — not granted, deliberately. Joel pushes.',
+  'Verification: node --test, npm test, npm run, npx tsc, npx vitest. Use them.',
+  'An edit you have not verified is not finished; run the tests and say what',
+  'they actually returned rather than that a change "should" work.',
+  'Delegation: the Task tool IS available. Route work as your instructions say',
+  'rather than doing a specialist\'s job yourself — and every specialist you',
+  'spawn inherits exactly this tool list, so they can verify too.',
+  'Research: WebSearch and WebFetch are available for anything your training',
+  'would be stale on.',
+  'One rule about all of it: never report work you did not do. Do not say you',
+  'routed, assigned or handed something off unless you actually called Task,',
+  'and never report a specialist as finished unless one really ran and',
+  'reported back. If you could not do something, say so plainly.',
+].join(' ');
 
 /**
  * Memory lives in joeru-kit, outside this repo, and Claude Code confines tool
@@ -360,7 +499,17 @@ function makeStreamReader(onEvent = () => {}) {
   };
 }
 
-function ask(question, onEvent, sessionId = null) {
+/**
+ * @param {string} question the prompt to send — normally the grounded one,
+ *   with the state block and the rules wrapped around it.
+ * @param {(e: object) => void} [onEvent]
+ * @param {string|null} [sessionId]
+ * @param {string|null} [rawQuestion] what the user actually said, used ONLY to
+ *   pick the model. It has to be passed separately: `question` is the grounded
+ *   prompt, which names tasks, attention, usage and git on every single turn,
+ *   so routing on it would escalate everything to Opus and defeat the point.
+ */
+function ask(question, onEvent, sessionId = null, rawQuestion = null) {
   cancel();
 
   const q = String(question || '').trim();
@@ -391,14 +540,18 @@ function ask(question, onEvent, sessionId = null) {
     // No shell: the exe is invoked directly, so arguments containing spaces
     // need no quoting and cannot be re-split.
     const proc = spawn(cli, [
-      '-p', '--agent', AGENT, '--model', MODEL,
+      '-p', '--agent', AGENT,
+      // Joeru is the dispatcher, so he stays cheap; the specialists he spawns
+      // run on their own declared tiers. See the note on MODEL.
+      ...modelFor(AGENT),
       // Start or continue — one shared decision, tested in shared/. Getting
       // it backwards is how "Session ID already in use" happened.
       ...resumeFlags(session, { started, exists: transcriptExists }),
       // Append rather than replace: --system-prompt would discard the agent's
       // persona and this project's context, which are the reason for using
       // the agent at all.
-      '--append-system-prompt', VOICE_STYLE,
+      // Style, plus the truth about what is available — see CAPABILITY_NOTE.
+      '--append-system-prompt', `${CAPABILITY_NOTE}\n\n${VOICE_STYLE}`,
       '--allowedTools', ...GRANTED_TOOLS,
       ...(dirs.length ? ['--add-dir', ...dirs] : []),
       /*
@@ -617,7 +770,27 @@ function chat({ sessionId, agent, text }, onEvent = () => {}) {
       '-p',
       ...resumeFlags(sessionId, { started, exists: transcriptExists }),
       '--agent', agent || AGENT,
-      // No --model: the agent's declared tier decides. See the note above.
+      /*
+       * Joeru cheap here too; everyone else on their own tier.
+       *
+       * Chat used to pass no --model at all, so Joeru ran on the `opus` his
+       * definition declares — for every message, including "what's the
+       * status". That was the larger of the two leaks, because Chat is where
+       * the long sessions happen. He is the dispatcher in this window as much
+       * as in the voice one.
+       *
+       * A specialist picked from the dropdown still gets no --model, so
+       * backend-engineer stays on sonnet and security-reviewer on opus, which
+       * is the whole point of the roster carrying tiers.
+       */
+      ...modelFor(agent),
+      /*
+       * No VOICE_STYLE here — this reply is read, not spoken — but the
+       * capability note applies just as much. Chat passes the same restricted
+       * tool list, so an agent told it routes work cannot do that here either,
+       * and would narrate it for exactly the same reason.
+       */
+      '--append-system-prompt', CAPABILITY_NOTE,
       ...STREAM_FLAGS,
       '--allowedTools', ...GRANTED_TOOLS,
       ...(dirs.length ? ['--add-dir', ...dirs] : []),
