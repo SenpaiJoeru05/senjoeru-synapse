@@ -121,6 +121,68 @@ const TIMEOUT_MS = 90_000;
 const ALLOWED_TOOLS = ['Read', 'Write', 'Edit', 'Glob', 'Grep'];
 
 /**
+ * Git, by subcommand — so real work can actually be finished here.
+ *
+ * THE PROBLEM
+ *
+ * Asked to commit, Joeru got as far as "System won't let me run git checkout
+ * or stash even with your authorization". That was not caution, it was the
+ * tool list above: `Bash` was never granted, and print mode cannot prompt for
+ * permission because there is no terminal to answer, so every shell call was
+ * refused outright. Making a change and then being unable to commit it makes
+ * the window a demo.
+ *
+ * WHY SUBCOMMANDS RATHER THAN PLAIN `Bash` OR `Bash(git *)`
+ *
+ * Measured, because the security argument turned out to rest on a mistaken
+ * assumption:
+ *
+ *   - `whoami` runs even with NO Bash grant at all. Claude Code exempts
+ *     harmless reads from permission, so "Bash is not granted" never meant
+ *     "no commands run" the way the old comment here claimed.
+ *   - A write outside the working directory is refused — but by the DIRECTORY
+ *     scope (cwd plus --add-dir), not by the tool list. That is the real
+ *     containment boundary, and it is already in place.
+ *   - `git push` IS refused when only `git status` is granted. So subcommand
+ *     scoping genuinely works, and is worth spending.
+ *
+ * So: name the subcommands. `Bash(git *)` would sweep in `push`, `reset
+ * --hard` and `clean -fd` for no benefit, and plain `Bash` would hand a window
+ * that acts on misheard speech the whole shell.
+ *
+ * WHAT IS DELIBERATELY ABSENT
+ *
+ * `git push` — the one irreversible, outward-facing operation. A commit is
+ * local and recoverable; a push is neither, and pushing is exactly the step
+ * worth a human deciding. Joel pushes.
+ *
+ * `checkout` and `stash` ARE here, because branch work needs them, with the
+ * caveat that `git checkout -- .` can discard uncommitted changes. That is the
+ * sharpest edge in this list; it is included because the alternative is the
+ * feature not working, and it stays inside a repo that is under git anyway.
+ */
+const GIT_TOOLS = [
+  // Read-only.
+  'Bash(git status:*)',
+  'Bash(git diff:*)',
+  'Bash(git log:*)',
+  'Bash(git show:*)',
+  'Bash(git branch:*)',
+  'Bash(git remote:*)',
+  'Bash(git rev-parse:*)',
+  // Local and recoverable.
+  'Bash(git add:*)',
+  'Bash(git commit:*)',
+  'Bash(git restore:*)',
+  'Bash(git stash:*)',
+  'Bash(git switch:*)',
+  'Bash(git checkout:*)',
+];
+
+/** Everything the CLI may use here: files, search, and scoped git. */
+const GRANTED_TOOLS = [...ALLOWED_TOOLS, ...GIT_TOOLS];
+
+/**
  * Memory lives in joeru-kit, outside this repo, and Claude Code confines tool
  * access to the working directory unless told otherwise. Without this he could
  * not even READ his own memory index — verified: "I cannot read the file —
@@ -182,7 +244,9 @@ function describe() {
     // Reported rather than assumed: if joeru-kit has not been built on this
     // machine the agent is missing and answers come back as plain Claude.
     agentInstalled: hasAgent,
-    tools: ALLOWED_TOOLS,
+    // What is actually passed to the CLI, not just the file tools — otherwise
+    // the diagnostics panel would report no git access while git works.
+    tools: GRANTED_TOOLS,
     // Empty means memory is unreachable and he will say he cannot access it.
     extraDirs: dirs,
     canWriteMemory: dirs.length > 0 && ALLOWED_TOOLS.includes('Write'),
@@ -335,7 +399,7 @@ function ask(question, onEvent, sessionId = null) {
       // persona and this project's context, which are the reason for using
       // the agent at all.
       '--append-system-prompt', VOICE_STYLE,
-      '--allowedTools', ...ALLOWED_TOOLS,
+      '--allowedTools', ...GRANTED_TOOLS,
       ...(dirs.length ? ['--add-dir', ...dirs] : []),
       /*
        * Streamed, so the voice window can show what is being read.
@@ -555,7 +619,7 @@ function chat({ sessionId, agent, text }, onEvent = () => {}) {
       '--agent', agent || AGENT,
       // No --model: the agent's declared tier decides. See the note above.
       ...STREAM_FLAGS,
-      '--allowedTools', ...ALLOWED_TOOLS,
+      '--allowedTools', ...GRANTED_TOOLS,
       ...(dirs.length ? ['--add-dir', ...dirs] : []),
     ], { windowsHide: true, cwd: path.join(__dirname, '..') });
 

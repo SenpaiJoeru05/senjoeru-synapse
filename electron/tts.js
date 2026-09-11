@@ -18,6 +18,8 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+
+const { speakable } = require('../shared/speakable');
 const crypto = require('crypto');
 
 const ROOT = path.join(__dirname, '..', 'vendor', 'piper');
@@ -253,7 +255,22 @@ function dropStandby() {
 function speak(text) {
   cancel();
 
-  const clean = String(text || '').trim();
+  /*
+   * Markdown stripped here, at synthesis, so every caller is covered.
+   *
+   * Piper reads literally: asked about a price, Joeru answered with
+   * "**hoverboard**" and the voice said "star star hoverboard star star". The
+   * prompt already forbids markdown in spoken replies and he mostly complies,
+   * but "mostly" is not something to build on, and emphasising a word is the
+   * most natural thing a model does.
+   *
+   * Doing it here rather than at each call site means answers, acknowledgements,
+   * confirmations, errors and anything added later are all covered without
+   * anyone remembering to wrap them. The renderer keeps the original text and
+   * renders real markdown, so the bold survives on screen and only leaves the
+   * audio.
+   */
+  const clean = speakable(text);
   if (!clean) return Promise.resolve(null);
   if (!available()) return Promise.reject(new Error(describe().reason));
 

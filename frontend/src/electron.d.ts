@@ -203,8 +203,22 @@ export interface ElectronAPI {
     intent?: string | null
   }) => void
   assistantInsights?: () => Promise<AssistantInsights>
-  /** Resolves to WAV bytes, or null if the synthesis was cancelled. */
-  speak?: (text: string) => Promise<ArrayBuffer | null>
+  /**
+   * Synthesised audio, plus the caption track for it.
+   *
+   * `spoken` is the text Piper actually received — markdown stripped, since it
+   * reads "**bold**" out as "star star bold star star". `cues` are timed as
+   * fractions of playback (0..1) and are built from `spoken`, not from the
+   * original: the two differ in length wherever emphasis or a link was
+   * removed, and caption timing is proportional to length.
+   *
+   * `wav` is null when the synthesis was cancelled.
+   */
+  speak?: (text: string) => Promise<{
+    wav: ArrayBuffer | null
+    spoken: string
+    cues: { text: string; from: number; to: number }[]
+  } | ArrayBuffer | null>
   stopSpeaking?: () => Promise<boolean>
   setVoice?: (id: string) => Promise<TtsInfo>
   /** Resolves to null when nothing was said before the timeout. */

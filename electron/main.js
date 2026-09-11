@@ -245,6 +245,8 @@ const claudeSessions = require('./claude-sessions');
 const claudeUsage = require('../shared/usage-store');
 const assistantSessions = require('./assistant-sessions');
 const { createTracker } = require('../shared/assistant-session');
+const { speakable } = require('../shared/speakable');
+const { toCues } = require('../shared/captions');
 
 /*
  * Release the voice subprocesses on the way out.
@@ -363,9 +365,27 @@ ipcMain.handle('assistant-insights', async () => questions.insights());
 // Returns a WAV buffer. Sent whole rather than streamed: Piper renders a
 // sentence in well under a second, so chunking would add complexity for no
 // perceptible gain.
+/*
+ * Audio, plus the caption track for it.
+ *
+ * The cues are computed here rather than in the renderer so the splitting and
+ * timing logic has exactly one implementation — the one in shared/captions.js
+ * that CI tests. The renderer only has to pick the cue whose window contains
+ * the current playback position, which is a lookup, not logic.
+ *
+ * `spoken` is the text as Piper actually receives it, markdown stripped. The
+ * caption has to be built from that and not from the original: they differ in
+ * length wherever emphasis or a link was removed, and timing is proportional
+ * to length, so captioning the raw text would drift against the audio.
+ */
 ipcMain.handle('voice-speak', async (_e, text) => {
   const wav = await tts.speak(text);
-  return wav ? wav.buffer.slice(wav.byteOffset, wav.byteOffset + wav.byteLength) : null;
+  const spoken = speakable(text);
+  return {
+    wav: wav ? wav.buffer.slice(wav.byteOffset, wav.byteOffset + wav.byteLength) : null,
+    spoken,
+    cues: toCues(spoken),
+  };
 });
 
 ipcMain.handle('voice-stop-speaking', async () => { tts.cancel(); return true; });

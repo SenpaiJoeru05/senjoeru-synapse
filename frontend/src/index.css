@@ -60,3 +60,16 @@
 ::-webkit-scrollbar-thumb:hover {
   @apply bg-primary/50;
 }
+
+/*
+ * Caption cue transition.
+ *
+ * A cue swaps every couple of seconds while Joeru speaks, and an instant
+ * replacement reads as a flicker at that cadence. Short and opacity-only —
+ * anything that moves would fight the fixed-height caption box, whose whole
+ * purpose is that the sphere above it never shifts.
+ */
+@keyframes fadeIn {
+  from { opacity: 0 }
+  to   { opacity: 1 }
+}
