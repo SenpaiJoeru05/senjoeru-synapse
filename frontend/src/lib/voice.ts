@@ -132,6 +132,13 @@ class Player {
   /** Resolver for the in-flight play(), so stopping ends the wait. */
   private endedResolve: (() => void) | null = null
 
+  /**
+   * The caption's animation frame, so an interrupted utterance stops driving
+   * it. Without cancelling, barge-in leaves the previous answer's caption
+   * advancing underneath the new one.
+   */
+  private raf: number | null = null
+
   /** Non-null only while speaking, so the orb knows when to follow output. */
   analyser: AnalyserNode | null = null
 
@@ -158,7 +165,19 @@ class Player {
     return { ctx: this.ctx, analyser: this.analyserNode! }
   }
 
-  async play(wav: ArrayBuffer, onStart?: (a: AnalyserNode | null) => void): Promise<void> {
+  async play(
+    wav: ArrayBuffer,
+    onStart?: (a: AnalyserNode | null) => void,
+    /**
+     * Playback position as a fraction, 0..1, roughly once per frame.
+     *
+     * Piper hands back one finished WAV with no word timings, so there is no
+     * alignment data to sync a caption against. Position plus total duration
+     * is what there is, and it is enough: see shared/captions.js for why a
+     * character-proportional estimate holds within a single utterance.
+     */
+    onProgress?: (p: number) => void,
+  ): Promise<void> {
     this.stop()
 
     trace(`play: parsing wav (${wav.byteLength} bytes)`)
@@ -188,8 +207,31 @@ class Player {
       src.onended = () => { this.endedResolve = null; resolve() }
       // Small cushion even with a warm device: scheduling in the future means
       // the stream is already running when the first speech sample lands.
-      src.start(ctx.currentTime + LEAD_IN_SECONDS)
+      const startAt = ctx.currentTime + LEAD_IN_SECONDS
+      src.start(startAt)
       onStart?.(analyser)
+
+      /*
+       * Drive the caption off the audio clock, not a timer.
+       *
+       * setInterval would drift against playback and keep running if the
+       * source is stopped early; AudioContext.currentTime is the same clock
+       * the samples are played on, so the caption cannot slide out of step
+       * with what is being said. rAF also pauses when the window is hidden,
+       * which is exactly right for something only worth drawing when visible.
+       */
+      if (onProgress) {
+        const total = decoded.duration || 1
+        const tick = () => {
+          // Stop when this source is no longer the current one — an
+          // interrupted answer must not keep captioning over the next.
+          if (this.src !== src) return
+          const p = (ctx.currentTime - startAt) / total
+          onProgress(Math.max(0, Math.min(1, p)))
+          if (p < 1) this.raf = requestAnimationFrame(tick)
+        }
+        this.raf = requestAnimationFrame(tick)
+      }
     })
     trace('play: ended')
 
@@ -208,6 +250,10 @@ class Player {
    * reach the answer.
    */
   private stopSource() {
+    if (this.raf !== null) {
+      cancelAnimationFrame(this.raf)
+      this.raf = null
+    }
     if (this.src) {
       this.src.onended = null
       try { this.src.stop() } catch { /* not started, or already ended */ }
@@ -243,18 +289,71 @@ export const player = new Player()
  * it — so the orb can react from the first word instead of being polled on a
  * guessed delay.
  */
+/** One caption line group, as the main process timed it. */
+export interface Cue {
+  text: string
+  /** Fractions of playback, 0..1. */
+  from: number
+  to: number
+}
+
+/**
+ * The cue to show at a point in playback.
+ *
+ * A lookup, deliberately — all the actual logic (splitting, punctuation
+ * weighting, timing) lives in shared/captions.js where CI tests it, and the
+ * cues arrive already timed. Duplicating any of that here is how the two would
+ * drift apart.
+ */
+export function cueAt(cues: Cue[] | null, progress: number): string {
+  if (!cues || !cues.length) return ''
+  const p = Math.max(0, Math.min(1, Number.isFinite(progress) ? progress : 0))
+  for (const cue of cues) if (p >= cue.from && p < cue.to) return cue.text
+  // Clamped rather than blanked: the last cue stays up until the audio stops.
+  return cues[cues.length - 1].text
+}
+
 export async function say(
   text: string,
   onStart?: (a: AnalyserNode | null) => void,
+  /**
+   * The caption, as it should read right now. Fires on every animation frame
+   * of playback, and once with '' when the utterance ends.
+   */
+  onCaption?: (line: string) => void,
 ): Promise<void> {
   const a = api()
   if (!a?.speak || !text.trim()) return
   await a.stopSpeaking?.()
   player.stop()
   trace(`say: synthesizing ${text.length} chars`)
-  const wav = await a.speak(text)
-  trace(`say: got ${wav ? wav.byteLength + ' bytes' : 'null'}`)
-  if (wav) await player.play(wav, onStart)
+
+  const result = await a.speak(text)
+  /*
+   * Tolerates the old shape.
+   *
+   * `speak` used to resolve with a bare ArrayBuffer and now resolves with
+   * { wav, spoken, cues }. Handling both keeps the renderer working against a
+   * main process that has not been restarted — which is exactly the state the
+   * app is in between a code change and a relaunch, and a hard failure there
+   * looks like the voice being broken rather than stale.
+   */
+  const wav = result instanceof ArrayBuffer ? result : result?.wav ?? null
+  const cues = result instanceof ArrayBuffer ? null : result?.cues ?? null
+  trace(`say: got ${wav ? wav.byteLength + ' bytes' : 'null'}, ${cues?.length ?? 0} cues`)
+
+  if (!wav) return
+  try {
+    await player.play(
+      wav,
+      onStart,
+      onCaption && cues ? (p) => onCaption(cueAt(cues, p)) : undefined,
+    )
+  } finally {
+    // Clear it here rather than leaving the last line frozen on screen — the
+    // caption is a caption, not a transcript.
+    onCaption?.('')
+  }
 }
 
 export async function hush(): Promise<void> {

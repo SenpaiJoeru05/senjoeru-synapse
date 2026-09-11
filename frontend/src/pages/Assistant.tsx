@@ -14,11 +14,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   Bot, Send, Volume2, VolumeX, X, Loader2, Zap, Cloud, Mic, Sparkles, Terminal,
+  ChevronDown, ChevronUp,
   MessageSquarePlus,
 } from 'lucide-react'
 import { answerLocally, classify, type Answer } from '../lib/assistant-intents'
 import { api } from '../lib/api'
 import VoiceOrb from '../components/VoiceOrb'
+import Markdown from '../components/Markdown'
 import AssistantStats, { useWideEnough } from '../components/AssistantStats'
 import type { AssistantInsights } from '../electron'
 import { currentState, ground, type Exchange } from '../lib/grounding'
@@ -103,6 +105,35 @@ function toolDetail(input: unknown): string {
   // backslashes, so a forward-slash-only pattern shortens nothing and the
   // full "D:\Personal Works\..." fills the window.
   return String(raw).replace(/^.*[\\/]([^\\/]+)$/, '$1').slice(0, 40)
+}
+
+/**
+ * A tool call as a person would describe it.
+ *
+ * "Read" is what the CLI calls it; "Reading" is what is happening. This window
+ * is the one you glance at while waiting, and a row of bare tool names reads
+ * as a log — which is fine in the Chat tab, where you are already looking at
+ * code, and wrong under a sphere you are talking to.
+ *
+ * Unknown tools fall through to their own name rather than something vague:
+ * the CLI gains tools over time, and "Working" would hide which one.
+ */
+const TOOL_VERB: Record<string, string> = {
+  Read: 'Reading',
+  Edit: 'Editing',
+  MultiEdit: 'Editing',
+  Write: 'Writing',
+  Glob: 'Looking for',
+  Grep: 'Searching',
+  Bash: 'Running',
+  Task: 'Delegating',
+  TodoWrite: 'Planning',
+  WebFetch: 'Fetching',
+  WebSearch: 'Searching the web',
+}
+
+function toolVerb(name: string): string {
+  return TOOL_VERB[name] ?? name
 }
 
 /**
@@ -198,6 +229,43 @@ function LearnedPanel() {
 
 export default function Assistant() {
   const [turns, setTurns] = useState<Turn[]>([])
+
+  /**
+   * The live caption line, driven by playback position.
+   *
+   * Empty between utterances — this is a caption, not a transcript. When it is
+   * empty the box below the sphere falls back to the last thing said, so the
+   * answer is still readable after the voice stops without the layout moving.
+   */
+  const [caption, setCaption] = useState('')
+
+  /**
+   * Whether the conversation log is showing.
+   *
+   * Collapsible because this window is 440px wide and the sphere is what it is
+   * for — with the log always expanded, the thing you actually look at was
+   * squeezed into whatever was left. Open by default, since hiding history by
+   * default would make the first run look like nothing was recorded.
+   *
+   * Remembered per viewer in localStorage. Wrapped in try/catch: a renderer
+   * with site data blocked throws on access, and a preference is not worth a
+   * blank window.
+   */
+  const [showLog, setShowLog] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem('assistant.showLog') !== 'false'
+    } catch {
+      return true
+    }
+  })
+
+  const toggleLog = useCallback(() => {
+    setShowLog((v) => {
+      const next = !v
+      try { window.localStorage.setItem('assistant.showLog', String(next)) } catch { /* fine */ }
+      return next
+    })
+  }, [])
   const [input, setInput] = useState('')
   const [phase, setPhase] = useState<Phase>('idle')
   const [muted, setMuted] = useState(false)
@@ -280,12 +348,14 @@ export default function Assistant() {
     setPhase('speaking')
     try {
       // The orb picks up the analyser the moment playback is scheduled, rather
-      // than being polled on a guessed delay.
-      await say(text, (a) => setAnalyser(a))
+      // than being polled on a guessed delay. The caption follows the audio
+      // clock — see say() and shared/captions.js.
+      await say(text, (a) => setAnalyser(a), (line) => setCaption(line))
     } catch (e: any) {
       setStatus(`voice failed: ${e?.message ?? e}`)
     } finally {
       setAnalyser(null)
+      setCaption('')
       setPhase('idle')
     }
   }, [])
@@ -309,12 +379,17 @@ export default function Assistant() {
     setPhase('speaking')
     ackingRef.current = true
     try {
-      await say(line, (a) => setAnalyser(a))
+      // Captioned like any other speech: "Got it, doing it now" is spoken, so
+      // it should be readable too. Captioning only answers would make the
+      // caption appear to lag — the voice would be talking with nothing under
+      // the sphere.
+      await say(line, (a) => setAnalyser(a), (c) => setCaption(c))
     } catch {
       /* the answer still matters; stay quiet and carry on */
     } finally {
       ackingRef.current = false
       setAnalyser(null)
+      setCaption('')
       // Back to thinking, not idle: the request this covers is still in flight.
       setPhase('thinking')
     }
@@ -864,6 +939,56 @@ export default function Assistant() {
     : phase === 'thinking' ? 'Working…'
     : status ?? (voiceReady ? 'Click to speak' : 'Voice unavailable — you can still type')
 
+  /**
+   * What Joeru just said, shown under the sphere.
+   *
+   * The sphere carries the state and none of the content, so with the log
+   * collapsed there was nothing to read at all — the answer existed only as
+   * audio, and a word misheard was a word lost. This is the caption for it.
+   *
+   * The spoken text specifically, not `lines`: that is the on-screen detail
+   * the speech deliberately omits, and it belongs in the log where there is
+   * room for it.
+   */
+  /**
+   * What the caption box shows: the live cue, and nothing else.
+   *
+   * It used to fall back to the last answer once the voice stopped, so the
+   * text stayed under the sphere indefinitely. That is a transcript, not a
+   * caption — subtitles exist for the duration of the speech and then they are
+   * gone. The answer is not lost: it is in the conversation drawer, which is
+   * where a thing you want to re-read belongs.
+   *
+   * Cleared by say()'s finally and again by speakAnswer's, so an interrupted
+   * or failed utterance clears it just as a completed one does.
+   */
+  const captionLine = caption
+
+  /**
+   * The action Joeru is taking right now, for the strip under the sphere.
+   *
+   * Gated on the TURN still being in flight, not on `phase`.
+   *
+   * Phase was the obvious choice and it was wrong: the "Got it, doing it now"
+   * acknowledgement is spoken WHILE the request runs, and it sets the phase to
+   * 'speaking' for a second or two. So a gate of `phase === 'thinking'` blanked
+   * the strip during precisely the window where the first Read lands — the
+   * work carries on, the phase says otherwise.
+   *
+   * `pending` on the newest turn is true for exactly as long as there is work,
+   * which is the question being asked here. It also closes the other end:
+   * `activity` is cleared when a question STARTS, not when one finishes, so
+   * gating on its contents alone would keep showing the previous run's calls
+   * and claim he is reading a file he finished with.
+   *
+   * The newest action only. During a wait the useful question is "what is it
+   * doing now", not "what has it done" — and a growing feed here would push
+   * the caption around on every tool call. The full list is on the finished
+   * answer in the drawer.
+   */
+  const working = turns.length > 0 && turns[turns.length - 1].pending === true
+  const liveAction = working && activity.length ? activity[activity.length - 1] : null
+
   return (
     /*
      * A tinted ground behind the glass, not flat `bg-background`.
@@ -905,7 +1030,15 @@ export default function Assistant() {
                   setVoiceId(info?.voice ?? id)
                   setVoices(info?.voices ?? voices)
                   // Speak on change so the choice can be judged by ear.
-                  if (!mutedRef.current) await say('Voice set.')
+                  // Captioned like everything else that is spoken — every
+                  // utterance gets a caption, not just answers.
+                  if (!mutedRef.current) {
+                    try {
+                      await say('Voice set.', undefined, (c) => setCaption(c))
+                    } finally {
+                      setCaption('')
+                    }
+                  }
                 } catch (err: any) {
                   setStatus(`could not switch voice: ${err?.message ?? err}`)
                 }
@@ -951,7 +1084,143 @@ export default function Assistant() {
         </div>
       </div>
 
-      <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
+      {/*
+        The stage: sphere centred in whatever room is left, caption beneath it.
+
+        `flex-1` with centred content rather than a fixed block at the top —
+        the sphere then sits in the optical centre of the window at any height,
+        and stays put when the log is opened or closed underneath it.
+      */}
+      <div className="flex-1 min-h-0 flex flex-col items-center justify-center px-4">
+        <button
+          onClick={onOrbClick}
+          disabled={phase === 'thinking' || !voiceAvailable()}
+          title={phase === 'speaking' ? 'Interrupt' : 'Click and speak'}
+          className="relative rounded-full disabled:opacity-50 transition-transform hover:scale-[1.03] active:scale-[0.98]"
+        >
+          <VoiceOrb
+            analyser={analyser}
+            active={phase === 'listening'}
+            busy={phase === 'thinking' || phase === 'speaking'}
+            /* Larger now that it is the focus rather than a footer control. */
+            size={176}
+          />
+          {/*
+            The state icon sits at the BOTTOM of the sphere, not its centre.
+            Centred is where the waveform is drawn, and an opaque glyph there
+            covered the one part of this that carries information. Idle is the
+            exception — there is no trace to hide, and a microphone in the
+            middle is the clearest possible "click me".
+          */}
+          {phase === 'idle' ? (
+            <span className="absolute inset-0 flex items-center justify-center">
+              <Mic className="w-5 h-5 text-cyan-200/80" />
+            </span>
+          ) : (
+            <span className="absolute inset-x-0 bottom-1 flex items-center justify-center">
+              {phase === 'thinking'
+                ? <Loader2 className="w-4 h-4 text-cyan-200/90 animate-spin" />
+                : phase === 'listening'
+                  ? <span className="w-2.5 h-2.5 rounded-sm bg-cyan-200/90 animate-pulse" />
+                  : <span className="w-2.5 h-2.5 rounded-full bg-cyan-200/90" />}
+            </span>
+          )}
+        </button>
+
+        {/*
+          The caption.
+
+          Built like a subtitle rather than a paragraph: a fixed two-line box,
+          centred, that swaps its text as the voice moves through the sentence.
+          The height is fixed in `rem` and never varies — a box that grew with
+          the text would nudge the sphere on every cue change, which is the
+          jitter that makes captions feel cheap.
+
+          Plain text, not markdown. Subtitles are not styled, and the whole
+          point is that the markdown never reaches either the eye or the ear
+          (the audio half is shared/speakable.js).
+        */}
+        {/*
+          What he is touching right now — between the sphere and the caption.
+
+          Placed here because it answers the question you actually have during
+          a wait ("is it doing anything?") in the place you are already
+          looking. It used to exist only inside the pending turn in the log,
+          which is the drawer that is closed by default.
+
+          The row keeps its height whether or not there is an action, for the
+          same reason the caption box does: the sphere sits above it, and
+          anything that changes height here moves the sphere. Two fixed rows
+          stacked means neither the sphere nor the caption ever shifts.
+        */}
+        <div className="mt-4 h-6 w-full max-w-[22rem] flex items-center justify-center px-2">
+          {liveAction && (
+            <div
+              /* Keyed on the action so each new call fades in rather than the
+                 text swapping in place, which at this size reads as a flicker. */
+              key={`${liveAction.tool}:${liveAction.detail}:${activity.length}`}
+              className="animate-[fadeIn_140ms_ease-out] flex items-center gap-2 max-w-full
+                         rounded-full border border-cyan-400/20 bg-cyan-400/[0.07]
+                         px-2.5 py-1 backdrop-blur-sm"
+            >
+              <Terminal className="w-3 h-3 shrink-0 text-cyan-300/90" />
+              <span className="shrink-0 text-[11px] text-cyan-100/90">
+                {toolVerb(liveAction.tool)}
+              </span>
+              {liveAction.detail && (
+                <span className="truncate font-mono text-[11px] text-gray-400">
+                  {liveAction.detail}
+                </span>
+              )}
+              {activity.length > 1 && (
+                <span
+                  className="shrink-0 font-mono text-[10px] text-gray-600"
+                  title={`${activity.length} actions so far this turn`}
+                >
+                  {activity.length}
+                </span>
+              )}
+            </div>
+          )}
+        </div>
+
+        <div className="mt-2 w-full max-w-[22rem] h-[3.25rem] flex items-center justify-center">
+          {captionLine ? (
+            <p
+              key={captionLine}
+              className="animate-[fadeIn_140ms_ease-out] text-center text-[15px] leading-[1.6rem]
+                         font-medium tracking-[-0.01em] text-white/95
+                         [text-shadow:0_1px_10px_rgba(0,0,0,0.65)]"
+            >
+              {captionLine}
+            </p>
+          ) : (
+            <p className="text-center text-[13px] text-gray-600">
+              {turns.length ? '' : 'Ask about the state of work.'}
+            </p>
+          )}
+        </div>
+
+        <div className="h-4 mt-1 text-[11px] text-gray-500 text-center px-3 truncate max-w-full">
+          {hint}
+        </div>
+      </div>
+
+      {/*
+        The log, expanding upward from the bottom.
+
+        A drawer rather than a section in the flow: the sphere keeps the middle
+        of the window at all times, and the history slides over the bottom of
+        it when asked for. Capped at half the window so the sphere is never
+        pushed off screen by a long conversation.
+      */}
+      <div
+        ref={scrollRef}
+        className={`shrink-0 overflow-y-auto px-4 border-t border-white/5 bg-black/20
+                    ${showLog ? 'max-h-[50vh] py-3 space-y-3' : 'max-h-0 py-0'}`}
+        style={{ transition: 'max-height 180ms ease-out' }}
+        aria-hidden={!showLog}
+      >
         {turns.length === 0 && (
           <div className="text-sm text-gray-500 space-y-2">
             <p>Ask about the current state of work. These are answered locally —
@@ -1016,7 +1285,16 @@ export default function Assistant() {
                     : t.answer.source === 'claude'
                       ? <Sparkles className="w-3.5 h-3.5 text-violet-400 mt-0.5 shrink-0" />
                       : <Cloud className="w-3.5 h-3.5 text-sky-400 mt-0.5 shrink-0" />}
-                  <p className="text-sm leading-relaxed">{t.answer.speech}</p>
+                  {/*
+                    Rendered, not printed raw. The model emphasises words even
+                    though the prompt asks it not to, and "**hoverboard**" on
+                    screen is the visible half of the bug whose audible half —
+                    the voice saying "star star" — is handled in
+                    shared/speakable.js.
+                  */}
+                  <div className="text-sm leading-relaxed min-w-0 [&_p]:m-0 [&_p+p]:mt-1.5">
+                    <Markdown>{t.answer.speech}</Markdown>
+                  </div>
                 </div>
                 {t.answer.lines.length > 0 && (
                   <div className="font-mono text-[11px] text-gray-500 space-y-0.5 pl-5">
@@ -1035,45 +1313,29 @@ export default function Assistant() {
       </div>
 
       <div className="shrink-0 border-t border-white/5">
-        <div className="flex flex-col items-center pt-4 pb-2">
-          <button
-            onClick={onOrbClick}
-            disabled={phase === 'thinking' || !voiceAvailable()}
-            title={phase === 'speaking' ? 'Interrupt' : 'Click and speak'}
-            className="relative rounded-full disabled:opacity-50 transition-transform hover:scale-[1.03] active:scale-[0.98]"
-          >
-            <VoiceOrb
-              analyser={analyser}
-              active={phase === 'listening'}
-              busy={phase === 'thinking' || phase === 'speaking'}
-              size={150}
-            />
-            {/*
-              The state icon sits at the BOTTOM of the sphere, not its centre.
-              Centred is where the waveform is drawn, and an opaque glyph there
-              covered the one part of this that carries information. Idle is the
-              exception — there is no trace to hide, and a microphone in the
-              middle is the clearest possible "click me".
-            */}
-            {phase === 'idle' ? (
-              <span className="absolute inset-0 flex items-center justify-center">
-                <Mic className="w-5 h-5 text-cyan-200/80" />
-              </span>
-            ) : (
-              <span className="absolute inset-x-0 bottom-1 flex items-center justify-center">
-                {phase === 'thinking'
-                  ? <Loader2 className="w-4 h-4 text-cyan-200/90 animate-spin" />
-                  : phase === 'listening'
-                    ? <span className="w-2.5 h-2.5 rounded-sm bg-cyan-200/90 animate-pulse" />
-                    : <span className="w-2.5 h-2.5 rounded-full bg-cyan-200/90" />}
-              </span>
-            )}
-          </button>
 
-          <div className="h-4 mt-1 text-[11px] text-gray-500 text-center px-3 truncate max-w-full">
-            {hint}
-          </div>
-        </div>
+        {/*
+          The handle for the drawer above, at the very bottom of the window.
+
+          Full width and clickable along its whole length rather than a small
+          chevron: it is the only affordance for the history, and a 12px target
+          in a window you talk to is the wrong trade.
+        */}
+        <button
+          onClick={toggleLog}
+          className="w-full flex items-center justify-between px-4 py-2
+                     text-[10px] uppercase tracking-wider text-gray-600
+                     hover:text-gray-300 hover:bg-white/[0.03] transition-colors"
+          title={showLog ? 'Hide the conversation' : 'Show the conversation'}
+        >
+          <span className="flex items-center gap-1.5">
+            {showLog ? <ChevronDown className="w-3 h-3" /> : <ChevronUp className="w-3 h-3" />}
+            Conversation
+          </span>
+          {turns.length > 0 && (
+            <span className="font-mono tabular-nums text-gray-700">{turns.length}</span>
+          )}
+        </button>
 
         <form onSubmit={(e) => { e.preventDefault(); ask(input) }}
           className="flex items-center gap-2 p-3 pt-1">
