@@ -1,5 +1,3 @@
-import { isOn as presentationOn } from './presentation'
-
 /**
  * Turning data into something a person would actually say.
  *
@@ -7,22 +5,27 @@ import { isOn as presentationOn } from './presentation'
  *
  *   "Nothing's in progress at the moment, one task waiting, fifteen tasks
  *    complete, and two items need your attention."
- *   "The main one is Over weekly AI budget — 297 dollars and 28 cents of 50
- *    dollars, 595 percent."
+ *   "The main one is Almost out of weekly (7d) limit — 96% used · resets in 3h."
  *
  * Three things are wrong with those, and none of them is the facts.
  *
  * They are LISTS, joined with commas. Four counts in one breath is a table
  * read aloud; a person leads with the one that matters and stops.
  *
- * They are OVER-PRECISE. Nobody wants "26 dollars and 74 cents" spoken —
- * "about twenty-seven dollars" is the same information at the resolution the
- * question was asked in. Exact figures stay on screen, where scanning is cheap.
+ * They are OVER-PRECISE. Nobody wants "96.4 per cent" spoken, or a bracketed
+ * "(7d)" that only means anything on screen. Exact figures stay in the
+ * transcript, where scanning is cheap.
  *
- * They report FIELDS rather than meaning. "Over weekly AI budget, 595 percent"
- * is a row from the attention queue; "you're nearly six times over your weekly
- * budget" is what it means. Reading the title as a noun phrase is what makes
- * it sound like a machine — it never rephrases, because it never understood.
+ * They report FIELDS rather than meaning. "Almost out of weekly (7d) limit,
+ * 96% used" is a row from the attention queue; "you're at 96 per cent of your
+ * weekly limit, resetting in 3h" is what it means. Reading the title as a noun
+ * phrase is what makes it sound like a machine — it never rephrases, because
+ * it never understood.
+ *
+ * The money helpers this file used to carry (approxMoney, moneyAdjective,
+ * overBy) went with the cost metrics: those figures priced every token at one
+ * flat rate whatever model ran, and a subscription has no per-token bill for
+ * them to describe. Phrasing a wrong number well is not an improvement.
  */
 
 const WORDS = [
@@ -34,58 +37,6 @@ const WORDS = [
 /** Words up to twenty, digits above — "thirty-seven tasks" is rarer than useful. */
 export function spokenNumber(n: number): string {
   return n >= 0 && n <= 20 && Number.isInteger(n) ? WORDS[n] : String(n)
-}
-
-/**
- * Money at the precision speech wants.
- *
- * Cents are dropped above a few dollars because they are noise out loud, and
- * the hedge is explicit — "about" — so rounding can never be mistaken for a
- * precise claim. Under a dollar the cents ARE the answer, so they stay.
- */
-export function approxMoney(n: number): string {
-  const v = Math.abs(Number(n) || 0)
-  if (v < 1) return `${Math.round(v * 100)} cents`
-  const rounded = Math.round(v)
-  const dollars = `${rounded} dollar${rounded === 1 ? '' : 's'}`
-  // Only hedge when something was actually dropped.
-  return Math.abs(v - rounded) < 0.005 ? dollars : `about ${dollars}`
-}
-
-/**
- * Money used as an adjective: "a 50 dollar budget", never "50 dollars budget".
- *
- * English puts an attributive noun in the singular, and getting it wrong is
- * conspicuous out loud — it is the kind of slip that marks generated speech
- * more than any amount of stiffness.
- */
-export function moneyAdjective(n: number): string {
-  return `${Math.round(Math.abs(Number(n) || 0))} dollar`
-}
-
-/**
- * A ratio as a person says it, rather than as a percentage.
- *
- * "595 percent" needs mental arithmetic to mean anything; "nearly six times
- * over" lands immediately. Percentages survive only in the range where they
- * are the natural unit — approaching the limit.
- *
- * Every branch returns a fragment that composes with a following "the X
- * budget", including the under-limit one. An earlier version returned
- * "90 percent of it" there, which built "90 percent of it the 50 dollar
- * budget" — the grammar has to hold for every branch, not just the ones the
- * example happened to exercise.
- */
-export function overBy(spent: number, limit: number): string {
-  if (!limit || limit <= 0) return ''
-  const ratio = spent / limit
-  if (ratio < 1) return `at ${Math.round(ratio * 100)} percent of`
-  if (ratio < 1.15) return 'just over'
-  if (ratio < 1.9) return `about ${Math.round(ratio * 10) / 10} times over`
-  const times = Math.round(ratio)
-  // "nearly" when rounding up to reach it, "more than" when already past.
-  const word = times > ratio ? 'nearly' : 'more than'
-  return `${word} ${spokenNumber(times)} times over`
 }
 
 /**
@@ -122,35 +73,36 @@ export interface AttentionItem {
  * One attention item as a spoken clause.
  *
  * Phrased per kind, because the queue stores what is convenient for a table.
- * A task item's `title` is a real noun phrase and speaks well; a budget item's
- * is "Over weekly AI budget", which can only be read out, not said. The money
- * is recovered from `detail` — "$297.28 / $50.00 (595%)" — since that is where
- * the service puts it.
+ * A task item's `title` is a real noun phrase and speaks well; a limit item's
+ * is "Almost out of weekly (7d) limit", which can only be read out, not said.
+ * The figures are recovered from `detail` — "96% used · resets in 3h" — since
+ * that is where the service puts them.
  */
 export function phraseItem(item: AttentionItem): string {
   const title = String(item?.title ?? '').trim() || 'something'
 
-  if (item?.kind === 'budget') {
-    const nums = String(item.detail ?? '').match(/\$([\d.,]+)\s*\/\s*\$([\d.,]+)/)
-    const scope = /hour/i.test(title) ? 'this hour' : 'this week'
-    /*
-     * The fact survives presentation mode; the amount does not.
-     *
-     * These clauses are read aloud, and being over budget is still worth
-     * hearing during a call — it is the figure that is nobody else's business.
-     * Dropping the item entirely would hide a real alert to protect a number.
-     */
-    if (presentationOn()) {
-      return `you're over the AI budget ${scope}`
-    }
-    if (nums) {
-      const spent = Number(nums[1].replace(/,/g, ''))
-      const limit = Number(nums[2].replace(/,/g, ''))
-      const over = overBy(spent, limit)
-      return `your AI spend ${scope} is ${approxMoney(spent)}`
-        + `, ${over ? `${over} the ${moneyAdjective(limit)} budget` : 'past the budget'}`
-    }
-    return `you're over the AI budget ${scope}`
+  /*
+   * Plan-limit items, which replaced the old dollar-budget ones.
+   *
+   * The detail is "96% used · resets in 3h", and both halves matter out loud:
+   * the percentage says how bad it is and the reset says whether to wait or
+   * work around it. Nothing here is masked in presentation mode — a share of
+   * a rate-limit window discloses nothing about the business, which was the
+   * whole reason the old version had to hide its figures.
+   */
+  if (item?.kind === 'limit') {
+    const pct = String(item.detail ?? '').match(/([\d.]+)%/)
+    const resets = String(item.detail ?? '').match(/resets in ([\dhm\s]+)/)
+    // "Almost out of weekly (7d) limit" → "your weekly limit". The bracketed
+    // window length is for the eye, not the ear.
+    const which = title
+      .replace(/^(Almost out of|Approaching)\s*/i, '')
+      .replace(/\s*\([^)]*\)/g, '')
+      .trim() || 'usage limit'
+    const head = pct
+      ? `you're at ${Math.round(Number(pct[1]))} per cent of your ${which}`
+      : `you're close to your ${which}`
+    return resets ? `${head}, resetting in ${resets[1].trim()}` : head
   }
 
   switch (item?.kind) {

@@ -108,7 +108,13 @@ function titleFrom(file) {
  * Ordered by mtime rather than by anything inside the file: it is the one
  * signal that is cheap, always present, and actually means "last used".
  */
-function list(projectDir) {
+/**
+ * @param {string} projectDir
+ * @param {Set<string>} [exclude] session ids to leave out — Assistant Mode's
+ *   one-shot transcripts, which are a per-question implementation detail and
+ *   not conversations anyone would want to resume. See assistant-sessions.js.
+ */
+function list(projectDir, exclude = null) {
   const dir = sessionDir(projectDir);
   if (!dir) return [];
 
@@ -121,13 +127,22 @@ function list(projectDir) {
 
   const rows = [];
   for (const f of files) {
+    const id = path.basename(f, '.jsonl');
+    /*
+     * Checked by id, before touching the file. Filtering these by looking at
+     * their contents instead would mean reading every transcript to render
+     * forty rows — the exact cost the title handling below avoids, and this
+     * directory already holds a 23MB transcript.
+     */
+    if (exclude && exclude.has(id)) continue;
+
     const full = path.join(dir, f);
     let stat;
     try { stat = fs.statSync(full); } catch { continue; }
     // A transcript with nothing in it is a session that was opened and
     // abandoned; listing it is noise.
     if (stat.size < 2) continue;
-    rows.push({ id: path.basename(f, '.jsonl'), updated: stat.mtimeMs, bytes: stat.size });
+    rows.push({ id, updated: stat.mtimeMs, bytes: stat.size });
   }
 
   rows.sort((a, b) => b.updated - a.updated);
@@ -306,7 +321,7 @@ const MAX_HITS = 40;
  * substring test, and a miss on the raw text cannot hide a hit in the parsed
  * form. Only files that match are then parsed, to pull the surrounding line.
  */
-function search(projectDir, query) {
+function search(projectDir, query, exclude = null) {
   const q = String(query || '').trim().toLowerCase();
   if (q.length < 2) return [];
 
@@ -324,6 +339,14 @@ function search(projectDir, query) {
   const titles = readTitles();
 
   for (const f of files) {
+    /*
+     * The same exclusion as `list()`, and it matters more here: every
+     * Assistant Mode transcript contains the whole grounding state block, so
+     * a search for a task title or a repo name would match dozens of them
+     * and bury the real conversations.
+     */
+    if (exclude && exclude.has(path.basename(f, '.jsonl'))) continue;
+
     const full = path.join(dir, f);
     let raw;
     try {

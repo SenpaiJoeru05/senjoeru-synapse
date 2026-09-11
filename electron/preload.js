@@ -35,6 +35,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   claudeAsk: (question) => ipcRenderer.invoke('claude-ask', question),
   claudeCancel: () => ipcRenderer.invoke('claude-cancel'),
   /**
+   * Start a fresh Assistant Mode conversation. Resolves with the new session
+   * id and the one it replaced — the old conversation is kept, so the Chat tab
+   * can still open it.
+   */
+  assistantNewConversation: () => ipcRenderer.invoke('assistant-new-conversation'),
+  /** Which conversation Assistant Mode is in, or null before the first question. */
+  assistantSession: () => ipcRenderer.invoke('assistant-session'),
+  /**
    * Tool activity for the answer in flight. Returns an unsubscribe function —
    * without one, every mount adds another listener and one Read is reported
    * as many times as the window has been opened.
@@ -55,6 +63,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
   claudeSessionSearch: (query) => ipcRenderer.invoke('claude-session-search', query),
   claudeChatCancel: (sessionId) => ipcRenderer.invoke('claude-chat-cancel', sessionId),
   claudeChatForget: (sessionId) => ipcRenderer.invoke('claude-chat-forget', sessionId),
+  // Real subscription usage (5-hour and weekly windows). Observed from calls
+  // already being made, so this is a cheap read and never itself spends quota.
+  claudeUsage: () => ipcRenderer.invoke('claude-usage'),
+  /**
+   * Fires the moment a new reading is recorded, so the bars move with the
+   * answer rather than on the next poll. Returns an unsubscribe function —
+   * without one, every mount would add another listener.
+   */
+  onClaudeUsageUpdate: (cb) => {
+    const handler = (_e, payload) => cb(payload);
+    ipcRenderer.on('claude-usage-update', handler);
+    return () => ipcRenderer.removeListener('claude-usage-update', handler);
+  },
   /**
    * Subscribe to tool activity for the turn in flight. Returns an unsubscribe
    * function — without one, every mount would add another listener and the

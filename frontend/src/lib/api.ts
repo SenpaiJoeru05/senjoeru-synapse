@@ -144,6 +144,16 @@ export const api = {
   async joeruMemory(): Promise<any> {
     return (await axios.get(`${API_BASE_URL}/joeru/memory`)).data
   },
+  /**
+   * Real plan usage (5-hour + weekly windows), for the browser build.
+   *
+   * Under Electron prefer `window.electronAPI.claudeUsage()` — it reads the
+   * same snapshot without a round trip. Both return `usage: null` when nothing
+   * has been observed yet, which is not zero usage.
+   */
+  async usage(): Promise<any> {
+    return (await axios.get(`${API_BASE_URL}/usage`)).data
+  },
   async joeruSaveMemory(folder: string, slug: string, data: { description?: string; body: string }): Promise<any> {
     return (await axios.put(`${API_BASE_URL}/joeru/memory/${folder}/${encodeURIComponent(slug)}`, data)).data
   },

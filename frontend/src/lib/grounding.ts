@@ -16,17 +16,17 @@ import { isOn as presentationOn } from './presentation'
 
 /** Compact enough to prepend to every question without meaningful cost. */
 export async function currentState(): Promise<string> {
-  const [tasks, attention, costs, git, memory] = await Promise.all([
+  const [tasks, attention, tokens, git, memory, usage] = await Promise.all([
     api.getMetric('tasks').catch(() => null),
     api.getAttention().catch(() => null),
-    api.getMetric('costs').catch(() => null),
+    api.getMetric('tokens').catch(() => null),
     api.getMetric('git').catch(() => null),
     /*
      * The memory index, because its absence was the whole problem.
      *
      * Asked "how do I work?", the Chat tab read MEMORY.md and answered from
      * it; Assistant Mode did not — and that was not the model. The state
-     * block held tasks, attention, spend and git and no memory at all, while
+     * block held tasks, attention, usage and git and no memory at all, while
      * the prompt below told it not to go looking for files. So it had neither
      * the facts nor permission to fetch them, and answered from general
      * knowledge instead.
@@ -37,6 +37,19 @@ export async function currentState(): Promise<string> {
      * is exactly what the prompt now permits.
      */
     api.joeruMemory().catch(() => null),
+    /*
+     * Real plan limits, so "how much have I used?" is answerable.
+     *
+     * Distinct from the token counts below, and the distinction is the point:
+     * tokens measure how much work has been done, while this is the cap that
+     * actually stops the work. Asked "am I close to my limit" when the block
+     * held only a dollar budget, the model answered about the budget — the
+     * same category error as the "ok thanks" budget report, and just as
+     * confidently wrong.
+     */
+    (window.electronAPI?.claudeUsage
+      ? window.electronAPI.claudeUsage()
+      : api.usage()).catch(() => null),
   ])
 
   const lines: string[] = []
@@ -47,12 +60,16 @@ export async function currentState(): Promise<string> {
     if (!items.length) lines.push('  (empty)')
     for (const i of items) {
       /*
-       * A budget item's `detail` is "$297.28 / $50.00 (595%)" — the exact
-       * figures, inside the block the model is told to answer from. Masking
-       * the spend line below and leaving this would have leaked the same
-       * numbers by another route, and the model would have read them out.
+       * No masking needed here any more.
+       *
+       * This used to strip the detail off `budget` items, because theirs read
+       * "$297.28 / $50.00 (595%)" and leaving it would have leaked the exact
+       * spend figures the line below was masking. Those items are gone — the
+       * queue now carries `limit` items whose detail is "96% used · resets in
+       * 3h", which is a percentage of a rate-limit window and discloses
+       * nothing about the business.
        */
-      const detail = presentationOn() && i.kind === 'budget' ? '' : i.detail
+      const detail = i.detail
       lines.push(`  - [${i.severity}] ${i.kind}: ${i.title}${detail ? ` (${detail})` : ''}`)
     }
   } else {
@@ -75,16 +92,29 @@ export async function currentState(): Promise<string> {
     lines.push('Task board: UNAVAILABLE')
   }
 
-  // Presentation mode: the model must not be handed figures it would then
-  // read out loud. The fact that spend exists is fine; the amounts are not.
+  /*
+   * Token volume, not money.
+   *
+   * The dollar figures that used to sit here were removed rather than masked,
+   * because they were not true: the collector priced every token at one flat
+   * Sonnet rate whatever model actually ran, and a subscription has no
+   * per-token bill for them to describe. Handing the model a wrong number and
+   * asking it not to over-report it was solving the wrong problem — it was the
+   * figure that was wrong, not the model's willingness to read it out.
+   *
+   * Token counts ARE real (deduplicated by message id from the transcripts),
+   * so they stay, and they are still masked in presentation mode: a volume of
+   * work leaks less than an amount of money, but it is not nothing.
+   */
   if (presentationOn()) {
-    lines.push('Spend: HIDDEN (presentation mode) — do not state or estimate any amount')
-  } else if (costs) {
-    lines.push(`Spend: $${Number(costs.today ?? 0).toFixed(2)} today, `
-      + `$${Number(costs.weekly ?? 0).toFixed(2)} this week, `
-      + `$${Number(costs.monthly ?? 0).toFixed(2)} this month`)
+    lines.push('Token usage: HIDDEN (presentation mode) — do not state or estimate any figure')
+  } else if (tokens) {
+    lines.push(`Token usage: ${Number(tokens.today ?? 0).toLocaleString()} today, `
+      + `${Number(tokens.weekly ?? 0).toLocaleString()} this week`)
+    lines.push('  (there is NO dollar cost figure in this system — it is a '
+      + 'subscription, and any amount you state would be invented)')
   } else {
-    lines.push('Spend: UNAVAILABLE')
+    lines.push('Token usage: UNAVAILABLE')
   }
 
   /*
@@ -108,6 +138,36 @@ export async function currentState(): Promise<string> {
     lines.push('Memory: UNAVAILABLE')
   }
 
+  /*
+   * Percentages of a rate-limit window, never masked by presentation mode:
+   * they say nothing about the business, unlike a token or money figure.
+   *
+   * The "not observed yet" case is spelled out rather than omitted, because
+   * silence here is what made the model guess. A window it cannot see must
+   * produce "I can't see it", not a reassuring number.
+   */
+  const windows = usage?.usage?.windows
+  if (windows && Object.keys(windows).length) {
+    const label: Record<string, string> = {
+      five_hour: '5-hour session limit',
+      seven_day: '7-day weekly limit',
+      seven_day_opus: 'Opus weekly limit',
+      seven_day_sonnet: 'Sonnet weekly limit',
+    }
+    const parts: string[] = []
+    for (const [key, win] of Object.entries(windows as Record<string, any>)) {
+      const resets = typeof win.resetsAt === 'number'
+        ? `, resets ${new Date(win.resetsAt * 1000).toLocaleString()}`
+        : ''
+      parts.push(`${label[key] ?? key} ${win.usedPercent}% used${resets}`)
+    }
+    lines.push(`Claude plan limits (${usage.stale ? 'last seen' : 'current'}): ${parts.join('; ')}`)
+    lines.push('  (these are subscription rate limits — the cap that stops '
+      + 'work, not a measure of how much work was done)')
+  } else {
+    lines.push('Claude plan limits: UNAVAILABLE (not observed yet this session)')
+  }
+
   if (git?.available === false) {
     lines.push(`Git: UNAVAILABLE (${git.reason ?? 'unknown'})`)
   } else if (git?.repos) {
@@ -123,21 +183,34 @@ export async function currentState(): Promise<string> {
 export interface Exchange {
   question: string
   answer: string
+  /**
+   * Which brain answered — and therefore whether the CLI already knows about
+   * this turn. See `history()` below for why only some are re-sent.
+   */
+  source?: 'local' | 'claude' | 'joeru'
 }
 
 /**
- * The recent conversation, so a follow-up means what it says.
+ * The turns the CLI cannot see, so a follow-up still means what it says.
  *
- * Every call is a fresh `claude -p` process with no memory of the last one, so
- * "mark that as complete" arrived with nothing for "that" to refer to. It has
- * appeared to work, which is worse than failing: asked to mark "that" complete
- * it went and found the single task in Reviewing and was right by luck. With
- * two such tasks it would have picked one.
+ * THIS USED TO BE THE WHOLE CONVERSATION, AND NO LONGER IS.
  *
- * Four exchanges, not the whole session. Every line is re-sent on every
- * question — there is no server-side session to append to — so history is paid
- * for in full each time, and a voice conversation refers back a turn or two,
- * not twenty.
+ * Assistant Mode now holds one CLI session for the app run, so the model has
+ * genuine memory of everything it answered — re-sending those turns would
+ * show it the same exchange twice, once from its own transcript and once
+ * quoted back at it, which is a good way to make it distrust both.
+ *
+ * But the session has holes. Most questions never reach the CLI at all: the
+ * status, next, spend and small-talk intents are answered locally in
+ * assistant-intents.ts precisely because they are instant and free. Those
+ * exchanges happened as far as the user is concerned, and are invisible to the
+ * session. So a conversation can go:
+ *
+ *   "what needs my attention?"   → answered locally, CLI never saw it
+ *   "mark the second one done"   → goes to the CLI, which has no idea
+ *
+ * which is the original failure returning by a new route. Hence: send exactly
+ * the turns the CLI did not handle, and label them as such.
  */
 const HISTORY_TURNS = 4
 
@@ -145,16 +218,19 @@ const HISTORY_TURNS = 4
 const HISTORY_CHARS = 400
 
 function history(recent: Exchange[]): string[] {
-  const use = recent.slice(-HISTORY_TURNS).filter((e) => e.question && e.answer)
+  const unseen = recent.filter((e) => e.question && e.answer && e.source !== 'claude')
+  const use = unseen.slice(-HISTORY_TURNS)
   if (!use.length) return []
   return [
-    '--- CONVERSATION SO FAR (oldest first) ---',
+    // Named for what it is. "CONVERSATION SO FAR" would contradict the
+    // transcript the model already holds, which is worse than saying nothing.
+    '--- EARLIER TURNS YOU DID NOT HANDLE (answered without you, oldest first) ---',
     ...use.flatMap((e) => [
       `Me: ${e.question}`,
-      `You: ${e.answer.length > HISTORY_CHARS
+      `Answered for you: ${e.answer.length > HISTORY_CHARS
         ? `${e.answer.slice(0, HISTORY_CHARS)}…` : e.answer}`,
     ]),
-    '--- END CONVERSATION ---',
+    '--- END EARLIER TURNS ---',
     '',
   ]
 }
@@ -175,9 +251,28 @@ export function ground(question: string, state: string, recent: Exchange[] = [])
     'You are answering one turn of a spoken conversation.',
     '',
     'The CURRENT STATE below is read live from the dashboard and is',
-    'authoritative for tasks, attention, spend and git — prefer it over',
+    'authoritative for tasks, attention, usage and git — prefer it over',
     'anything you remember or infer, and do not go hunting through the',
     'repository to re-confirm those numbers.',
+    '',
+    /*
+     * The hazard that comes with holding one session for the whole app run.
+     *
+     * Every question carries a fresh state block, so after twenty questions
+     * the transcript holds twenty of them — one saying the 5-hour window is
+     * at 40 per cent, a later one at 90. Nothing in the earlier prompts said
+     * which wins, and reading an old one would produce a confidently wrong
+     * answer from correct data. That is the same shape as the "ok thanks"
+     * budget report: not a hallucination, a context mistake.
+     *
+     * Stated on every turn rather than once at the start, because the turn
+     * being answered is the one that has to get it right, and a rule from
+     * twenty messages ago competes with nineteen stale blocks.
+     */
+    'This conversation may contain EARLIER CURRENT STATE blocks from previous',
+    'questions. They are out of date. Only the last one — the one below — is',
+    'true. Never quote a figure from an earlier block, and if you notice two',
+    'that disagree, the later one is correct.',
     '',
     /*
      * The one exception, and it exists because the blanket ban was wrong.

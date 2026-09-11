@@ -1065,17 +1065,19 @@ export default function JoeruChat() {
                     {t.seconds !== undefined && (
                       <span className="text-[10px] text-gray-600 tabular-nums">{t.seconds}s</span>
                     )}
-                    {/* Only when the runner priced it — OpenCode's free tier
-                        reports nothing, and printing $0.0000 there would claim
-                        a measurement that was never taken. */}
-                    {t.costUsd !== undefined && (
-                      <span
-                        title="What this turn cost, as the CLI reported it"
-                        className="text-[10px] text-gray-600 tabular-nums"
-                      >
-                        ${t.costUsd.toFixed(4)}
-                      </span>
-                    )}
+                    {/*
+                      The per-turn dollar figure used to render here.
+
+                      Unlike the dashboard's cost metrics it was accurate — the
+                      CLI reports `total_cost_usd` itself, rather than pricing
+                      tokens at a flat guessed rate. It is gone anyway, because
+                      it measures money that a subscription does not spend
+                      per-turn, and a real number answering the wrong question
+                      is still the wrong number to show.
+
+                      `costUsd` is still captured on the turn, so putting this
+                      back is a display change and nothing more.
+                    */}
                     <CopyButton text={t.text} />
                     {/* Only on the newest answer: retrying an older one would
                         ask the question again at the end of a conversation

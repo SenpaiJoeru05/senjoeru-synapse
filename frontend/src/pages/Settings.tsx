@@ -14,7 +14,7 @@ import {
   AlertCircle,
   Loader2,
   Clock,
-  DollarSign,
+  Activity,
 } from 'lucide-react'
 import { api } from '@/lib/api'
 
@@ -25,8 +25,7 @@ interface Config {
   repositories: string[]
   autoRefresh: boolean
   notifications: boolean
-  hourlyBudget: number
-  weeklyBudget: number
+  usageWarnPercent: number
 }
 
 const DEFAULTS: Config = {
@@ -39,8 +38,7 @@ const DEFAULTS: Config = {
   repositories: [],
   autoRefresh: true,
   notifications: false,
-  hourlyBudget: 5,
-  weeklyBudget: 50,
+  usageWarnPercent: 80,
 }
 
 type SaveState = 'idle' | 'saving' | 'saved' | 'error'
@@ -344,52 +342,49 @@ export default function Settings() {
           </div>
         </motion.div>
 
-        {/* ── Budget Limits ───────────────────────────────────────────────── */}
+        {/* ── Usage Limits ────────────────────────────────────────────────── */}
         <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.15 }} className="glass-card">
           <h2 className="text-xl font-bold mb-6 flex items-center gap-2">
-            <DollarSign className="w-5 h-5 text-warning" />
-            Budget Limits
+            <Activity className="w-5 h-5 text-primary" />
+            Plan Usage Alerts
           </h2>
 
           <div className="space-y-4">
-            <div className="p-4 rounded-lg bg-surface2">
-              <label className="block text-sm font-medium mb-1">Hourly Budget (USD)</label>
-              <p className="text-xs text-gray-500 mb-3">Alert when spending exceeds this amount in a single hour</p>
-              <div className="flex items-center gap-3">
-                <span className="text-gray-400 text-sm">$</span>
-                <input
-                  type="number"
-                  min={0.5}
-                  max={100}
-                  step={0.5}
-                  value={config.hourlyBudget}
-                  onChange={e => update({ hourlyBudget: Math.max(0.5, Number(e.target.value)) })}
-                  className="w-32 px-3 py-2 rounded-lg bg-background border border-white/10 focus:border-primary focus:outline-none text-sm font-mono"
-                />
-                <span className="text-gray-500 text-sm">per hour</span>
-              </div>
-            </div>
+            {/*
+              One threshold against the real plan window, in place of the two
+              dollar budgets that used to be here.
 
+              Those compared a notional API-equivalent price — every token
+              charged at one flat Sonnet rate, whatever model actually ran —
+              against a ceiling with no bearing on when work would stop. This
+              one is a percentage of the 5-hour and weekly windows the
+              subscription genuinely enforces.
+            */}
             <div className="p-4 rounded-lg bg-surface2">
-              <label className="block text-sm font-medium mb-1">Weekly Budget (USD)</label>
-              <p className="text-xs text-gray-500 mb-3">Alert when weekly spending exceeds this amount</p>
+              <label className="block text-sm font-medium mb-1">Warn at (% of plan limit)</label>
+              <p className="text-xs text-gray-500 mb-3">
+                Add an attention-queue item once a Claude usage window passes this
+                much. Anything at or above 95% is always flagged.
+              </p>
               <div className="flex items-center gap-3">
-                <span className="text-gray-400 text-sm">$</span>
                 <input
                   type="number"
-                  min={1}
-                  max={500}
+                  min={10}
+                  max={99}
                   step={5}
-                  value={config.weeklyBudget}
-                  onChange={e => update({ weeklyBudget: Math.max(1, Number(e.target.value)) })}
+                  value={config.usageWarnPercent}
+                  onChange={e => update({
+                    usageWarnPercent: Math.min(99, Math.max(10, Number(e.target.value))),
+                  })}
                   className="w-32 px-3 py-2 rounded-lg bg-background border border-white/10 focus:border-primary focus:outline-none text-sm font-mono"
                 />
-                <span className="text-gray-500 text-sm">per week</span>
+                <span className="text-gray-500 text-sm">% used</span>
               </div>
             </div>
 
             <p className="text-xs text-gray-600 px-1">
-              Based on Sonnet 4.6 pricing: $3/M input · $15/M output · $0.30/M cache-read · $3.75/M cache-write
+              Read from the API's own rate-limit headers on each response — no
+              estimate, and nothing is spent to check it.
             </p>
           </div>
         </motion.div>

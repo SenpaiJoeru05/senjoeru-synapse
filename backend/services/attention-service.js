@@ -1,20 +1,51 @@
 /**
  * AttentionService — Phase "Proactive Attention": the "what needs YOU right now"
- * queue. 100% zero-token, computed on read from SQLite tasks + settings budgets +
- * the disposable cost metrics. Derived/regeneratable; nothing persisted.
+ * queue. 100% zero-token, computed on read from SQLite tasks plus the recorded
+ * plan-limit snapshot. Derived/regeneratable; nothing persisted.
  *
  * Surfaces four kinds of items a senior engineer should act on:
  *   - failed  : a task marked Failed
  *   - review  : a task waiting in Reviewing
  *   - stalled : a Working/Pending task untouched for >= STALE_DAYS
- *   - budget  : hourly/weekly AI spend at/over the configured budget
+ *   - limit   : a Claude plan window near or at exhaustion
+ *
+ * WHY `limit` REPLACED `budget`
+ *
+ * This used to compare `costs.json` against an hourly/weekly dollar budget. The
+ * dollars were never real: the collector priced every token at one flat Sonnet
+ * rate, while Chat runs Opus and Assistant Mode runs Haiku, so it overcounted
+ * and undercounted at the same time with no way to know the net. And on a
+ * subscription there is no per-token bill at all — the figure was a notional
+ * API-equivalent price for tokens a flat fee had already covered.
+ *
+ * What that alert was really for was "warn me before I hit a wall", and the
+ * dollar budget was only ever a proxy for the rate limit. Now that the real
+ * windows are recorded (see shared/usage-limits.js) the proxy is redundant:
+ * "weekly limit 96% used, resets in 3h" is the actual wall, and it cannot
+ * drift from reality because the server reports it.
  */
-const fs = require('fs-extra');
-const path = require('path');
 
 const STALE_DAYS = 7;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const SEV_RANK = { high: 0, medium: 1, low: 2 };
+
+/** Windows worth alerting on, with the wording used in the queue. */
+const LIMIT_LABELS = {
+  five_hour: 'session (5h) limit',
+  seven_day: 'weekly (7d) limit',
+  seven_day_opus: 'Opus weekly limit',
+  seven_day_sonnet: 'Sonnet weekly limit',
+};
+
+/**
+ * Almost-out, and worth-knowing.
+ *
+ * `high` is deliberately close to the wall: a 5-hour window at 80% is normal
+ * mid-session and an alert there would fire most afternoons, which is how a
+ * queue teaches you to ignore it.
+ */
+const LIMIT_CRITICAL_PERCENT = 95;
+const LIMIT_WARN_PERCENT = 80;
 
 function daysSince(iso, now) {
   if (!iso) return null;
@@ -23,23 +54,41 @@ function daysSince(iso, now) {
   return Math.floor((now.getTime() - t) / DAY_MS);
 }
 
+/** "4h 34m" / "40m", or null when the reset time is unknown or already past. */
+function formatReset(resetsAt, nowMs) {
+  if (typeof resetsAt !== 'number') return null;
+  const seconds = resetsAt - Math.floor(nowMs / 1000);
+  if (seconds <= 0) return null;
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.round((seconds % 3600) / 60);
+  if (!hours) return `${minutes}m`;
+  return minutes ? `${hours}h ${minutes}m` : `${hours}h`;
+}
+
 class AttentionService {
   /**
    * @param {import('../repositories/task-repository').TaskRepository} taskRepo
    * @param {{ getAll: () => object }} settingsService
-   * @param {string} metricsDir - absolute path to metrics/ (for costs.json)
+   * @param {string} [metricsDir] - retained for call-site compatibility; unused
+   *   since budget alerts became plan-limit alerts and costs.json stopped
+   *   being read here.
+   * @param {() => {usage: object|null}} [readUsage] - injectable snapshot reader
    */
-  constructor(taskRepo, settingsService, metricsDir) {
+  constructor(taskRepo, settingsService, metricsDir, readUsage = null) {
     this.taskRepo = taskRepo;
     this.settingsService = settingsService;
     this.metricsDir = metricsDir;
-  }
-
-  _readCosts() {
-    try {
-      const p = path.join(this.metricsDir, 'costs.json');
-      return fs.existsSync(p) ? fs.readJsonSync(p) : {};
-    } catch (_) { return {}; }
+    /*
+     * Injectable so tests can supply a snapshot without writing to the real
+     * data directory. Required lazily in the default so that requiring this
+     * service never depends on the store being loadable.
+     */
+    this.readUsage = readUsage
+      || (() => {
+        try {
+          return require('../../shared/usage-store').read();
+        } catch (_) { return { usage: null }; }
+      });
   }
 
   summary(now = new Date()) {
@@ -68,23 +117,41 @@ class AttentionService {
       }
     }
 
-    // ── Budget items ──────────────────────────────────────────────────────
+    // ── Plan limit items ──────────────────────────────────────────────────
     const s = this.settingsService ? this.settingsService.getAll() : {};
-    const c = this._readCosts();
-    const budgets = [
-      { key: 'weekly', label: 'weekly', spent: Number(c.weekly) || 0, limit: Number(s.weeklyBudget) || 0 },
-      { key: 'hourly', label: 'this hour', spent: Number(c.thisHour) || 0, limit: Number(s.hourlyBudget) || 0 },
-    ];
-    for (const b of budgets) {
-      if (b.limit <= 0) continue;
-      const pct = b.spent / b.limit;
-      const detail = `$${b.spent.toFixed(2)} / $${b.limit.toFixed(2)} (${Math.round(pct * 100)}%)`;
-      if (pct >= 1) {
-        items.push({ id: `budget:${b.key}`, kind: 'budget', severity: 'high',
-          title: `Over ${b.label} AI budget`, detail, entityId: b.key, since: c.lastUpdated || null });
-      } else if (pct >= 0.9) {
-        items.push({ id: `budget:${b.key}`, kind: 'budget', severity: 'medium',
-          title: `Near ${b.label} AI budget`, detail, entityId: b.key, since: c.lastUpdated || null });
+    /*
+     * A configured threshold still applies, because the old budget alert was
+     * configurable and taking that away would be a downgrade. It is now a
+     * percentage of the real window rather than a dollar ceiling.
+     */
+    const warnAt = Number(s.usageWarnPercent) > 0
+      ? Number(s.usageWarnPercent) : LIMIT_WARN_PERCENT;
+
+    const snapshot = this.readUsage() || {};
+    const windows = (snapshot.usage && snapshot.usage.windows) || {};
+    for (const [key, win] of Object.entries(windows)) {
+      const label = LIMIT_LABELS[key];
+      // Unknown window kinds are skipped rather than surfaced by raw key —
+      // "seven_day_oauth_apps 12% used" is noise, not an action.
+      if (!label || typeof win.usedPercent !== 'number') continue;
+
+      const pct = win.usedPercent;
+      const resets = formatReset(win.resetsAt, now.getTime());
+      const detail = `${pct}% used${resets ? ` · resets in ${resets}` : ''}`;
+      /*
+       * `since` is when the reading was taken, not when the window opened.
+       * The queue sorts by it, and a snapshot from an hour ago genuinely is
+       * older news than a task that changed a minute ago.
+       */
+      const since = snapshot.usage && snapshot.usage.at
+        ? new Date(snapshot.usage.at).toISOString() : null;
+
+      if (pct >= LIMIT_CRITICAL_PERCENT) {
+        items.push({ id: `limit:${key}`, kind: 'limit', severity: 'high',
+          title: `Almost out of ${label}`, detail, entityId: key, since });
+      } else if (pct >= warnAt) {
+        items.push({ id: `limit:${key}`, kind: 'limit', severity: 'medium',
+          title: `Approaching ${label}`, detail, entityId: key, since });
       }
     }
 
@@ -99,7 +166,7 @@ class AttentionService {
       failed: items.filter((i) => i.kind === 'failed').length,
       review: items.filter((i) => i.kind === 'review').length,
       stalled: items.filter((i) => i.kind === 'stalled').length,
-      budget: items.filter((i) => i.kind === 'budget').length,
+      limit: items.filter((i) => i.kind === 'limit').length,
     };
 
     return { generatedAt: now.toISOString(), items, counts };

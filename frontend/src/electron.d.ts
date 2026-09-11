@@ -33,6 +33,36 @@ export interface AssistantInsights {
   file: string
 }
 
+/**
+ * A plan-usage reading.
+ *
+ * `usage: null` means never observed — which is NOT zero usage, and must not
+ * render as an empty bar. It stays null permanently on API-key, Bedrock and
+ * Vertex sessions, where plan windows do not apply.
+ *
+ * Recorded as a side effect of Chat and Assistant Mode answers, so it costs
+ * nothing to read and can legitimately be stale; `ageMs` and `stale` exist to
+ * be shown, not hidden.
+ */
+export interface UsagePayload {
+  usage: {
+    source: 'stream' | 'statusline'
+    /** When this reading was observed, ms since epoch. */
+    at: number
+    status: 'allowed' | 'allowed_warning' | 'rejected' | null
+    /** Which window the server says is currently binding. */
+    binding: string | null
+    windows: Record<string, {
+      /** 0-100, one decimal. */
+      usedPercent: number
+      /** Unix SECONDS, or null when unknown. */
+      resetsAt: number | null
+    }>
+  } | null
+  stale: boolean
+  ageMs: number | null
+}
+
 export interface ElectronAPI {
   getMetrics?: () => Promise<unknown>
   getSystemInfo?: () => Promise<{
@@ -62,9 +92,25 @@ export interface ElectronAPI {
       reason: string | null
     }
   }>
-  /** One-shot question through the Claude Code CLI. Resolves with the answer. */
+  /**
+   * A question through the Claude Code CLI, within Assistant Mode's session.
+   *
+   * No longer one-shot: the main process holds one session for the life of the
+   * app run, so a follow-up actually refers back. The session id is not a
+   * parameter — the renderer must not be able to answer into a different
+   * conversation than the one the reset button controls.
+   */
   claudeAsk?: (question: string) => Promise<string>
   claudeCancel?: () => Promise<boolean>
+  /**
+   * Start a fresh Assistant Mode conversation, without restarting the app.
+   *
+   * The previous conversation is kept, not deleted — it stays openable from
+   * Chat's sidebar, which is the point of giving these sessions real titles.
+   */
+  assistantNewConversation?: () => Promise<{ id: string; previous: string | null }>
+  /** Which conversation Assistant Mode is in, or null before the first question. */
+  assistantSession?: () => Promise<{ id: string | null }>
   /**
    * Tool activity for the answer in flight. Returns an unsubscribe function.
    *
@@ -120,6 +166,25 @@ export interface ElectronAPI {
   }[]>
   /** Drop a session so the next turn starts fresh rather than resuming. */
   claudeChatForget?: (sessionId: string) => Promise<boolean>
+  /**
+   * Real plan usage, as reported by the API itself.
+   *
+   * `usage` is null when it has never been observed — which is NOT the same as
+   * 0% used, and must not render as an empty bar. It stays null forever on an
+   * API-key, Bedrock or Vertex session, where plan windows do not apply.
+   *
+   * Recorded as a side effect of Chat and Assistant Mode answers, so it costs
+   * nothing to read and can legitimately be stale; `ageMs` and `stale` are
+   * there to be shown, not hidden.
+   */
+  claudeUsage?: () => Promise<UsagePayload>
+  /**
+   * New readings, pushed as they are recorded. Returns an unsubscribe function.
+   *
+   * Broadcast to every window, because the windows are account-wide: an
+   * Assistant Mode answer moves the same bars the Overview is drawing.
+   */
+  onClaudeUsageUpdate?: (cb: (p: UsagePayload) => void) => () => void
   /** Live tool activity for the turn in flight. Returns an unsubscribe function. */
   onClaudeChatEvent?: (cb: (e: {
     sessionId: string

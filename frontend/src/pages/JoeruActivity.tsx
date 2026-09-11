@@ -2,10 +2,10 @@ import { useMemo } from 'react'
 import { motion } from 'framer-motion'
 import {
   Bot, Wrench, AlertTriangle, FolderGit2, Cpu, CircleSlash,
-  CornerDownRight, Clock, Coins, MessagesSquare,
+  CornerDownRight, Clock, MessagesSquare,
 } from 'lucide-react'
 import { useMetric } from '@/lib/realtime'
-import { money, usePresentationMode } from '@/lib/presentation'
+import { usePresentationMode } from '@/lib/presentation'
 
 interface Session {
   id: string
@@ -181,7 +181,7 @@ export default function JoeruActivity() {
 
   const sessions: Session[] = data?.sessions ?? []
   const agents: AgentStat[] = data?.agents ?? []
-  const totals = data?.totals ?? { sessions: 0, messages: 0, toolCalls: 0, cost: 0 }
+  const totals = data?.totals ?? { sessions: 0, messages: 0, toolCalls: 0 }
   const tools: Record<string, number> = data?.tools ?? {}
 
   // Roots with their subagent runs attached, so a delegation reads as one unit
@@ -236,8 +236,16 @@ export default function JoeruActivity() {
         <Stat icon={Bot} label="Messages" value={totals.messages} color="text-violet-400" />
         <Stat icon={Wrench} label="Tool calls" value={totals.toolCalls}
               sub={`${sum(tools, PRODUCING)} produced changes`} color="text-sky-400" />
-        <Stat icon={Coins} label="Cost" value={money(totals.cost)}
-              sub="free tier" color="text-emerald-400" />
+        {/*
+          The "Cost" stat that used to complete this row is gone.
+
+          It came from OpenCode's own session rows, so unlike the collector's
+          estimate it was not invented — but on the free tier it read $0.00
+          essentially always, which is a zero pretending to be a measurement.
+          Nothing replaces it: this endpoint reports no token total, and
+          substituting a figure it does not return would be the same mistake in
+          a new place. Three real stats beat four with one hollow.
+        */}
       </div>
 
       {stuck.length > 0 && (

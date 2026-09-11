@@ -3,6 +3,7 @@ const {
 } = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
+const { randomUUID } = require('crypto');
 const windowState = require('./assistant-window-state');
 const isDev = !app.isPackaged;
 
@@ -241,6 +242,9 @@ const stt = require('./stt');
 const whisper = require('./whisper');
 const claude = require('./claude');
 const claudeSessions = require('./claude-sessions');
+const claudeUsage = require('../shared/usage-store');
+const assistantSessions = require('./assistant-sessions');
+const { createTracker } = require('../shared/assistant-session');
 
 /*
  * Release the voice subprocesses on the way out.
@@ -281,8 +285,43 @@ ipcMain.handle('voice-info', async () => ({
   claude: claude.describe(),
 }));
 
-// Assistant Mode's answering brain. One question per invocation, triggered by
-// the user — the same thing as typing `claude -p` in a terminal.
+/**
+ * Which conversation Assistant Mode is in.
+ *
+ * One session for the life of the app run, so Joeru remembers what was said
+ * two questions ago instead of meeting you fresh each time. Held in memory on
+ * purpose: quitting is the natural "start again", and restoring last week's
+ * conversation would carry context nobody remembers having.
+ *
+ * See shared/assistant-session.js for the measurements — history was ~500
+ * tokens against ~44,000 of fixed context re-paid per question, so this costs
+ * less than the one-shot it replaces rather than more.
+ */
+const assistantSession = createTracker({ uuid: randomUUID });
+
+/**
+ * Give the session a name a person would recognise.
+ *
+ * Its first user message is the grounding preamble, so the derived title would
+ * read "You are answering one turn of a spoken conversation" — which is what
+ * cluttered Chat's sidebar in the first place. Now that these sessions are
+ * real conversations worth resuming, they need a real title.
+ *
+ * Best effort: a failure here costs a nice name, and must never stop an answer.
+ */
+function nameAssistantSession(id) {
+  try {
+    const when = new Date().toLocaleString(undefined, {
+      month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+    });
+    claudeSessions.rename(id, `Assistant Mode — ${when}`);
+  } catch {
+    // Unnamed is fine; unanswered is not.
+  }
+}
+
+// Assistant Mode's answering brain. Triggered by the user — the same thing as
+// typing `claude -p` in a terminal, continuing one session.
 ipcMain.handle('claude-ask', async (event, question) => {
   /*
    * Tool activity is pushed while the answer is being worked out.
@@ -295,7 +334,15 @@ ipcMain.handle('claude-ask', async (event, question) => {
     // The window can close mid-answer; a destroyed webContents throws.
     if (!event.sender.isDestroyed()) event.sender.send('claude-ask-event', payload);
   };
-  return claude.ask(question, send);
+
+  // Named on the turn that creates it, not on every turn — renaming on each
+  // question would keep overwriting a title the user may have set themselves.
+  const fresh = !assistantSession.started();
+  const sessionId = assistantSession.current();
+
+  const answer = await claude.ask(question, send, sessionId);
+  if (fresh) nameAssistantSession(sessionId);
+  return answer;
 });
 
 // What gets asked, and which brain answered. A question that keeps falling
@@ -388,7 +435,7 @@ ipcMain.handle('claude-chat', async (event, { sessionId, agent, text }) => {
  */
 const PROJECT_DIR = path.join(__dirname, '..');
 
-ipcMain.handle('claude-sessions', async () => claudeSessions.list(PROJECT_DIR));
+ipcMain.handle('claude-sessions', async () => claudeSessions.list(PROJECT_DIR, assistantSessions.ids()));
 
 ipcMain.handle('claude-session-read', async (_e, id) => {
   try {
@@ -420,7 +467,7 @@ ipcMain.handle('claude-session-delete', async (_e, id) => {
 
 ipcMain.handle('claude-session-search', async (_e, query) => {
   try {
-    return claudeSessions.search(PROJECT_DIR, query);
+    return claudeSessions.search(PROJECT_DIR, query, assistantSessions.ids());
   } catch {
     return [];
   }
@@ -431,6 +478,60 @@ ipcMain.handle('claude-chat-cancel', async (_e, sessionId) => claude.cancelChat(
 ipcMain.handle('claude-chat-forget', async (_e, sessionId) => {
   claude.forget(sessionId);
   return true;
+});
+
+/*
+ * Real plan usage — the 5-hour session window and the 7-day weekly window.
+ *
+ * Read only, and never triggers a call of its own: the figures are recorded as
+ * a side effect of answers Chat and Assistant Mode were already producing. So
+ * asking for usage costs nothing, and the honest consequence is that it can be
+ * stale — which is why the age comes back with it rather than being hidden.
+ */
+/*
+ * Start a fresh Assistant Mode conversation without quitting the app.
+ *
+ * Needed because "it resets when you restart" is no bound at all on a window
+ * that stays open for days: each turn adds context, so a long session gets
+ * steadily heavier, and a misheard command can leave the conversation
+ * confused in a way only a clean slate fixes.
+ *
+ * Returns the new session id and the one it replaced, so the UI can say what
+ * happened rather than silently forgetting.
+ */
+ipcMain.handle('assistant-new-conversation', async () => {
+  const { id, previous } = assistantSession.reset();
+  return { id, previous };
+});
+
+/** Which conversation Assistant Mode is in, for the UI to show and link to. */
+ipcMain.handle('assistant-session', async () => ({
+  id: assistantSession.started() ? assistantSession.current() : null,
+}));
+
+ipcMain.handle('claude-usage', async () => claudeUsage.read());
+
+/*
+ * Push a new reading to every open window the moment it is recorded.
+ *
+ * Broadcast rather than replying to the window that asked, because the reading
+ * is account-wide: an answer in Assistant Mode moves the same bars the
+ * Overview page is showing, and only pushing to the asker would leave the
+ * dashboard a minute stale for no reason.
+ *
+ * Subscribed once at module scope — inside the IPC handler it would add a
+ * listener per call.
+ */
+claudeUsage.subscribe((snapshot) => {
+  const payload = { usage: snapshot, stale: false, ageMs: 0 };
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (win.isDestroyed()) continue;
+    try {
+      win.webContents.send('claude-usage-update', payload);
+    } catch {
+      // A window torn down mid-broadcast is not an error worth surfacing.
+    }
+  }
 });
 
 ipcMain.handle('open-assistant', async () => {

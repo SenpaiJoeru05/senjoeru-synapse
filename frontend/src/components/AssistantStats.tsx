@@ -7,7 +7,7 @@
  * now remembers its size, so widening the window is a real gesture with a real
  * result rather than a setting to find.
  *
- * The numbers are this workspace's own — spend, tasks, attention, git. The
+ * The numbers are this workspace's own — tasks, attention, git, plan limits. The
  * reference design this borrows its look from showed weather, restaurants and
  * clothes shops, because it was a mock for a consumer assistant. Those would be
  * decoration here; a HUD full of the figures you actually act on is both more
@@ -21,8 +21,9 @@ import {
   AlertTriangle, Coins, GitBranch, Loader2, Play, Clock as ClockIcon, Sun, Moon,
 } from 'lucide-react'
 import { api } from '@/lib/api'
-import { money, count, usePresentationMode } from '@/lib/presentation'
+import { count, usePresentationMode } from '@/lib/presentation'
 import { formatBytes } from '@/lib/utils'
+import UsageLimits from './UsageLimits'
 
 /** Slow enough to be free, quick enough that a completed task shows up. */
 const POLL_MS = 15_000
@@ -57,11 +58,10 @@ interface Snapshot {
   working: number
   waiting: number
   done: number
-  today: number
   tokens: number
   repos: number
   dirty: number
-  /** Last seven days of spend, for the sparkline. */
+  /** Last seven days of token volume, for the sparkline. */
   trend: number[]
 }
 
@@ -250,10 +250,9 @@ export default function AssistantStats() {
     let alive = true
 
     const load = async () => {
-      const [tasksM, attentionM, costsM, gitM, tokensM] = await Promise.all([
+      const [tasksM, attentionM, gitM, tokensM] = await Promise.all([
         api.getMetric('tasks').catch(() => null),
         api.getAttention().catch(() => null),
-        api.getMetric('costs').catch(() => null),
         api.getMetric('git').catch(() => null),
         api.getMetric('tokens').catch(() => null),
       ])
@@ -261,7 +260,7 @@ export default function AssistantStats() {
 
       // Every source failing means the backend is down, which is worth saying
       // rather than rendering a rail of confident zeroes.
-      if (!tasksM && !attentionM && !costsM && !gitM) { setFailed(true); return }
+      if (!tasksM && !attentionM && !tokensM && !gitM) { setFailed(true); return }
       setFailed(false)
 
       const tasks: any[] = tasksM?.tasks ?? []
@@ -274,11 +273,10 @@ export default function AssistantStats() {
         working: tasks.filter((t) => t.status === 'Working').length,
         waiting: tasks.filter((t) => t.status === 'Pending' || t.status === 'Reviewing').length,
         done: tasks.filter((t) => t.status === 'Completed').length,
-        today: Number(costsM?.today ?? 0),
         tokens: Number(tokensM?.today ?? 0),
         repos: repos.length,
         dirty: repos.reduce((n, r) => n + (r.modified?.length ?? 0), 0),
-        trend: (tokensM?.daily ?? []).slice(-7).map((d: any) => Number(d.cost ?? 0)),
+        trend: (tokensM?.daily ?? []).slice(-7).map((d: any) => Number(d.tokens ?? 0)),
       })
     }
 
@@ -336,19 +334,26 @@ export default function AssistantStats() {
         />
       </div>
 
-      {/* Spend gets the wide tile because it carries a trend as well as a value. */}
+      {/*
+        Tokens, with the week's trend. This tile used to lead with a dollar
+        figure; it no longer does, because that figure priced every token at
+        one flat Sonnet rate whatever model actually ran, and on a subscription
+        there is no per-token bill to report. The token count underneath it was
+        always the real measurement, so it is now the headline, and the
+        sparkline plots tokens rather than notional cost.
+
+        Still masked in presentation mode: a volume of work is a weaker signal
+        than a dollar amount, but it is not nothing.
+      */}
       <div className="glass rounded-xl px-2.5 py-2">
         <div className="flex items-center justify-between text-[9px] uppercase tracking-wider text-gray-500">
-          <span className="flex items-center gap-1.5"><Coins className="w-3 h-3" />Spend today</span>
+          <span className="flex items-center gap-1.5"><Coins className="w-3 h-3" />Tokens today</span>
           {presenting && <span className="text-amber-300/80 normal-case tracking-normal">hidden</span>}
         </div>
         <div className="mt-0.5 font-mono text-base leading-none tabular-nums text-cyan-200">
-          {money(snap.today)}
+          {presenting ? '····' : count(snap.tokens)}
         </div>
         <div className="mt-1.5"><Spark values={snap.trend} hidden={presenting} /></div>
-        <div className="mt-1 text-[9px] text-gray-600 font-mono">
-          {presenting ? 'tokens hidden' : `${count(snap.tokens)} tokens`}
-        </div>
       </div>
 
       {/*
@@ -387,6 +392,17 @@ export default function AssistantStats() {
           </div>
         </div>
       )}
+
+      {/*
+        Real plan limits, above the queue because running out of window stops
+        every other thing on this rail from being actionable.
+
+        Not masked by presentation mode: a percentage of a rate-limit window
+        reveals nothing about the business, unlike the spend figures. It is
+        also the reason this is separate from the token sparkline above —
+        that one is dollars Joel chose, this one is the cap he cannot exceed.
+      */}
+      <UsageLimits compact />
 
       {snap.topAttention && (
         <div className="glass rounded-xl px-2.5 py-2">

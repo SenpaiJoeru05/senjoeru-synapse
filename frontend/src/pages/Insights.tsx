@@ -3,10 +3,11 @@ import {
   ResponsiveContainer, ComposedChart, Bar, AreaChart, Area, BarChart,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend,
 } from 'recharts'
-import { TrendingUp, CheckCircle, GitCommit, DollarSign, Clock, RefreshCw, Activity, CalendarDays, Users } from 'lucide-react'
+import { TrendingUp, CheckCircle, GitCommit, Coins, Clock, RefreshCw, Activity, CalendarDays, Users } from 'lucide-react'
 import { api } from '@/lib/api'
-import { money, usePresentationMode } from '@/lib/presentation'
+import { usePresentationMode } from '@/lib/presentation'
 import { useTasks } from '@/lib/realtime'
+import { formatNumber } from '@/lib/utils'
 
 const AXIS = { stroke: '#6b7280', tick: { fill: '#9ca3af', fontSize: 11 }, axisLine: { stroke: '#374151' }, tickLine: false }
 const TOOLTIP = {
@@ -192,7 +193,13 @@ export default function Insights() {
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-5">
         <Stat icon={CheckCircle} color="text-success" label="Completed" value={String(velocity.totalCompleted)} sub={`in ${data.windowDays} days`} />
         <Stat icon={GitCommit} color="text-emerald-400" label="Commits" value={String(velocity.totalCommits)} sub={`in ${data.windowDays} days`} />
-        <Stat icon={DollarSign} color="text-warning" label="Total AI cost" value={money(cost.totalCost)} sub="all-time (recorded)" />
+        {/*
+          Tokens, not dollars. `cost.totalCost` came from the same collector
+          price table — every token charged at one flat Sonnet rate whatever
+          model actually ran — so it was wrong in both directions at once. The
+          token total beside it was always the real figure.
+        */}
+        <Stat icon={Coins} color="text-warning" label="Total tokens" value={formatNumber(cost.totalTokens)} sub="all-time (recorded)" />
         <Stat icon={Clock} color="text-primary" label="Sessions" value={String(sessions.total)} sub={`${sessions.activeNow} active · avg ${sessions.avgDurationMin}m`} />
       </div>
 
@@ -213,9 +220,16 @@ export default function Insights() {
           </ResponsiveContainer>
         </div>
 
-        {/* Cost trend */}
+        {/*
+          Token trend, not cost trend.
+
+          `cost.series` carries both `tokens` and `cost` per day; the cost
+          column is the collector's flat-rate estimate, so the shape of this
+          chart was right and its units were fiction. Plotting tokens gives
+          the identical curve with a number that means something.
+        */}
         <div className="glass-card">
-          <h2 className="text-lg font-bold mb-4 flex items-center gap-2"><DollarSign className="w-5 h-5 text-warning" /> AI cost trend</h2>
+          <h2 className="text-lg font-bold mb-4 flex items-center gap-2"><Coins className="w-5 h-5 text-warning" /> Token usage trend</h2>
           <ResponsiveContainer width="100%" height={260}>
             <AreaChart data={cost.series} margin={{ top: 5, right: 5, left: -10, bottom: 0 }}>
               <defs>
@@ -228,7 +242,7 @@ export default function Insights() {
               <XAxis dataKey="day" {...AXIS} interval={4} />
               <YAxis {...AXIS} />
               <Tooltip {...TOOLTIP} cursor={{ stroke: 'rgba(245,158,11,0.3)' }} />
-              <Area type="monotone" dataKey="cost" name="cost ($)" stroke="#f59e0b" strokeWidth={2} fill="url(#costG)" />
+              <Area type="monotone" dataKey="tokens" name="tokens" stroke="#f59e0b" strokeWidth={2} fill="url(#costG)" />
             </AreaChart>
           </ResponsiveContainer>
         </div>

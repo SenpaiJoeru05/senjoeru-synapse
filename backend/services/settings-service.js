@@ -19,8 +19,18 @@ const DEFAULTS = {
   repositories: [],
   autoRefresh: true,
   notifications: false,
-  hourlyBudget: 5,
-  weeklyBudget: 50,
+  /*
+   * Percentage of a Claude plan window at which the attention queue starts
+   * warning. Replaces hourlyBudget/weeklyBudget, which compared a notional
+   * dollar figure (every token priced as Sonnet, whatever model actually ran)
+   * against a ceiling that had no bearing on when work would actually stop.
+   *
+   * Existing config files may still carry the old budget keys. They are
+   * harmlessly ignored rather than migrated — nothing reads them now, and
+   * rewriting a user's config to delete keys is a worse trade than leaving
+   * two dead numbers in a file.
+   */
+  usageWarnPercent: 80,
 };
 
 class SettingsService {

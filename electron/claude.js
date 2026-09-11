@@ -17,8 +17,12 @@
  * status questions, not engineering work.
  */
 const { spawn } = require('child_process');
+const { randomUUID } = require('crypto');
 const fs = require('fs');
 const path = require('path');
+
+const usage = require('../shared/usage-store');
+const { resumeFlags } = require('../shared/assistant-session');
 
 /**
  * Model for one-shot questions. Startup dominates the latency (measured ~5.5s
@@ -250,6 +254,22 @@ function makeStreamReader(onEvent = () => {}) {
       return;
     }
 
+    /*
+     * Real account usage, free.
+     *
+     * The plan windows are account-wide, so this one-line Haiku answer reports
+     * the same 5h/7d utilisation as a heavy Opus session in the terminal. That
+     * is what makes this worth reading here rather than polling an endpoint:
+     * the numbers are already in the stream of a call we were making anyway.
+     *
+     * Emitted only when the figures change, so its absence is normal and must
+     * never be read as "usage is zero".
+     */
+    if (event?.type === 'rate_limit_event') {
+      usage.recordStreamEvent(event.rate_limit_info);
+      return;
+    }
+
     if (event?.type === 'result') {
       // The result event carries the settled answer; prefer it over the
       // accumulated deltas, which can include intermediate text.
@@ -276,7 +296,7 @@ function makeStreamReader(onEvent = () => {}) {
   };
 }
 
-function ask(question, onEvent) {
+function ask(question, onEvent, sessionId = null) {
   cancel();
 
   const q = String(question || '').trim();
@@ -288,10 +308,29 @@ function ask(question, onEvent) {
   return new Promise((resolve, reject) => {
     const dirs = extraDirs();
 
+    /*
+     * One conversation, continued.
+     *
+     * This used to mint a fresh session per question, which meant Joeru
+     * genuinely could not remember the previous sentence — continuity was
+     * faked by pasting the last four exchanges into the prompt, and broke on
+     * the fifth. The caller now supplies the session for the whole app run;
+     * see shared/assistant-session.js for the measurements behind that, and
+     * why it costs less rather than more.
+     *
+     * Falling back to a fresh id keeps this callable without a session — the
+     * alternative is throwing inside a voice answer, which would be a worse
+     * failure than a turn that simply forgets.
+     */
+    const session = String(sessionId || '').trim() || randomUUID();
+
     // No shell: the exe is invoked directly, so arguments containing spaces
     // need no quoting and cannot be re-split.
     const proc = spawn(cli, [
       '-p', '--agent', AGENT, '--model', MODEL,
+      // Start or continue — one shared decision, tested in shared/. Getting
+      // it backwards is how "Session ID already in use" happened.
+      ...resumeFlags(session, { started, exists: transcriptExists }),
       // Append rather than replace: --system-prompt would discard the agent's
       // persona and this project's context, which are the reason for using
       // the agent at all.
@@ -313,6 +352,7 @@ function ask(question, onEvent) {
       // this project's, not whatever directory Electron happened to start in.
       cwd: path.join(__dirname, '..'),
     });
+    started.add(session);
     current = proc;
 
     const reader = makeStreamReader(onEvent);
@@ -325,19 +365,48 @@ function ask(question, onEvent) {
     proc.stdout.on('data', (d) => reader.feed(d));
     proc.stderr.on('data', (d) => { err += d.toString(); });
 
+    /*
+     * Un-remember a session the CLI never actually created.
+     *
+     * `started` is added to at spawn time as a fast path, for the window where
+     * we know the session exists but its transcript is not yet flushed. If the
+     * spawn or the turn then FAILS, that entry is a lie — and with one session
+     * held for the whole app run it is a durable one: every later question
+     * would ask to --resume a session the CLI has no record of, and be refused.
+     * A single failed first question would break voice until restart.
+     *
+     * The disk is the arbiter, as everywhere else here: keep the entry only if
+     * a transcript really exists.
+     */
+    const forgetIfNeverCreated = () => {
+      try {
+        if (!transcriptExists(session)) started.delete(session);
+      } catch {
+        started.delete(session);
+      }
+    };
+
     proc.on('error', (e) => {
       clearTimeout(timer);
       current = null;
+      forgetIfNeverCreated();
       reject(new Error(`could not start Claude Code: ${e.message}`));
     });
 
     proc.on('close', (code, signal) => {
       clearTimeout(timer);
       current = null;
-      if (signal) { resolve(''); return; }   // cancelled
+      if (signal) {
+        // Cancelled. The transcript may or may not exist depending on how far
+        // the turn got, so ask rather than assume.
+        forgetIfNeverCreated();
+        resolve('');
+        return;
+      }
 
       const { text } = reader.result();
       if (code !== 0) {
+        forgetIfNeverCreated();
         // Colour codes stripped first: they make the message unreadable and
         // stop the caller's failure patterns matching the words in it.
         const detail = stripAnsi(err.trim() || text)
@@ -469,28 +538,20 @@ function chat({ sessionId, agent, text }, onEvent = () => {}) {
   if (!sessionId) return Promise.reject(new Error('a session id is required'));
 
   /*
-   * Resume when the transcript exists on disk — not when this process
-   * remembers creating it.
+   * Start or continue — the same decision Assistant Mode makes, in one place.
    *
-   * The in-memory set was wrong and produced "Session ID <uuid> is already in
-   * use". It is empty on every app start, and opening a stored conversation
-   * from the sidebar sets the renderer's session id without the main process
-   * ever having seen it. So the next turn passed --session-id for a session
-   * the CLI already had, and the CLI rejected it.
-   *
-   * The filesystem is the only honest source for this: the CLI owns those
-   * files, they outlive both processes, and "does the transcript exist" is
-   * exactly the question --resume-or-not is asking. The set is kept only as a
-   * fast path for the session this process just created.
+   * It used to be an inline conditional here and nowhere else, which is how it
+   * shipped wrong and produced "Session ID <uuid> is already in use". It now
+   * lives in shared/assistant-session.js with the tests that pin the case that
+   * broke, and both callers ask that function rather than each keeping their
+   * own version to drift apart.
    */
-  const resuming = started.has(sessionId) || transcriptExists(sessionId);
   const dirs = extraDirs();
 
   return new Promise((resolve, reject) => {
     const proc = spawn(cli, [
       '-p',
-      // First turn names the session; later turns continue it.
-      ...(resuming ? ['--resume', sessionId] : ['--session-id', sessionId]),
+      ...resumeFlags(sessionId, { started, exists: transcriptExists }),
       '--agent', agent || AGENT,
       // No --model: the agent's declared tier decides. See the note above.
       ...STREAM_FLAGS,

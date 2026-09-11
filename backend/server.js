@@ -516,6 +516,27 @@ app.get('/api/system/health', async (req, res) => {
   }
 });
 
+/*
+ * Real plan usage — the 5-hour and 7-day windows the subscription actually
+ * enforces, not the self-set dollar budget on the Overview page.
+ *
+ * This only ever reads the file Electron writes; the backend makes no Claude
+ * call of its own and must not, or "check my usage" would start costing quota.
+ * `usage: null` therefore means "not observed yet" and has to render as
+ * unknown — reporting it as 0% used would be the same class of lie the
+ * attention-queue grounding fix was about.
+ */
+app.get('/api/usage', async (req, res) => {
+  try {
+    // The store re-reads when the file's mtime changes, which is what lets
+    // this process see readings that Electron recorded. See usage-store.js.
+    const { read } = require('../shared/usage-store');
+    res.json(read());
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.get('/api/settings', async (req, res) => {
   try {
     // SQLite is the source of truth when available.

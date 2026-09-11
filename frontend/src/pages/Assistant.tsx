@@ -14,6 +14,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   Bot, Send, Volume2, VolumeX, X, Loader2, Zap, Cloud, Mic, Sparkles, Terminal,
+  MessageSquarePlus,
 } from 'lucide-react'
 import { answerLocally, classify, type Answer } from '../lib/assistant-intents'
 import { api } from '../lib/api'
@@ -325,8 +326,49 @@ export default function Assistant() {
    * A few more than ground() sends, so it can pick the most recent without
    * this having to know how many that is.
    */
-  const remember = useCallback((question: string, answer: string) => {
-    recentRef.current = [...recentRef.current, { question, answer }].slice(-8)
+  const remember = useCallback((
+    question: string,
+    answer: string,
+    /*
+     * Which brain answered, because it decides whether this turn gets
+     * re-sent. Assistant Mode now holds one CLI session, so turns the CLI
+     * answered are already in its transcript and quoting them back would
+     * show it the same exchange twice. Locally-answered turns are invisible
+     * to it and MUST be re-sent — see history() in grounding.ts.
+     *
+     * Defaults to 'local' because that is the majority and the safe side: a
+     * turn wrongly marked local is merely repeated, while one wrongly marked
+     * 'claude' vanishes from the context that needs it.
+     */
+    source: 'local' | 'claude' | 'joeru' = 'local',
+  ) => {
+    recentRef.current = [...recentRef.current, { question, answer, source }].slice(-8)
+  }, [])
+
+  /**
+   * Start a fresh conversation.
+   *
+   * The session is held in the main process, so this is the only way to clear
+   * it short of quitting — and it is needed, because "resets on restart" is no
+   * bound at all on a window left open for days. Each turn adds context, and a
+   * misheard command can leave the conversation confused in a way only a clean
+   * slate fixes.
+   *
+   * The old conversation is kept, not deleted: it keeps its "Assistant Mode —
+   * <time>" title and stays openable from Chat.
+   */
+  const newConversation = useCallback(async () => {
+    if (!window.electronAPI?.assistantNewConversation) return
+    try {
+      await window.electronAPI.assistantNewConversation()
+    } catch {
+      // A failed reset must not wedge the window; the old session still works.
+      return
+    }
+    // Local history goes too, or the next question would quote turns from a
+    // conversation the CLI no longer has.
+    recentRef.current = []
+    setTurns([])
   }, [])
 
   /** Perform a confirmed change. Reports failure rather than throwing. */
@@ -605,7 +647,7 @@ export default function Assistant() {
             // it has usually long finished anyway.
             await acked
             log('claude')
-            remember(q, answer)
+            remember(q, answer, 'claude')
             setTurns((t) => [...t.slice(0, -1), {
               question: q,
               answer: {
@@ -641,7 +683,7 @@ export default function Assistant() {
       if (failure && !text) {
         await acked   // as above: never talk over the acknowledgement
         log('failed')
-        remember(q, failure)
+        remember(q, failure, 'joeru')
         setTurns((t) => [...t.slice(0, -1), {
           question: q,
           answer: { intent: 'ask', speech: failure, lines: [], source: 'joeru' },
@@ -655,7 +697,7 @@ export default function Assistant() {
       await acked   // as above: never talk over the acknowledgement
       log('joeru')
       const said = text || 'Joeru returned nothing.'
-      remember(q, said)
+      remember(q, said, 'joeru')
       setTurns((t) => [...t.slice(0, -1), {
         question: q,
         answer: { intent: 'ask', speech: said, lines: [], source: 'joeru' },
@@ -875,6 +917,28 @@ export default function Assistant() {
                 <option key={v.id} value={v.id}>{v.id}</option>
               ))}
             </select>
+          )}
+          {/*
+            Start a fresh conversation.
+
+            Assistant Mode holds one CLI session for the app run, which is what
+            makes a follow-up work — but it also means the conversation gets
+            steadily heavier, and a misheard command can leave it confused. This
+            is the clean slate, without quitting the app. Only offered under
+            Electron, where there is a session to reset.
+
+            The old conversation is kept and keeps its title, so it stays
+            openable from Chat.
+          */}
+          {window.electronAPI?.assistantNewConversation && (
+            <button
+              onClick={newConversation}
+              disabled={busy}
+              title="Start a new conversation — Joeru forgets this one (it stays readable in Chat)"
+              className="p-1.5 rounded-lg text-gray-500 hover:text-white hover:bg-white/10 disabled:opacity-40 disabled:hover:bg-transparent"
+            >
+              <MessageSquarePlus className="w-4 h-4" />
+            </button>
           )}
           <button onClick={toggleMute} title={muted ? 'Unmute' : 'Mute'}
             className="p-1.5 rounded-lg text-gray-500 hover:text-white hover:bg-white/10">

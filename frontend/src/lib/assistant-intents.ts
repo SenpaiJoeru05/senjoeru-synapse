@@ -2,7 +2,7 @@
  * Assistant Mode's brain — deliberately NOT a model.
  *
  * Everything worth asking about the state of work is already computed locally
- * and costs nothing: the attention queue, the task board, git, costs. A reply
+ * and costs nothing: the attention queue, the task board, git, plan limits. A reply
  * from the configured OpenCode model measures 10-20s per turn on this machine
  * (and doubles for a question that needs a tool call), so routing "what's the
  * status" through it would make the one thing voice is good for — an instant
@@ -15,7 +15,7 @@
  */
 import { api } from './api'
 import {
-  approxMoney, moneyAdjective, overBy, phraseItem, spokenNumber, vary,
+  phraseItem, spokenNumber, vary,
 } from './phrasing'
 import { isOn as presentationOn } from './presentation'
 
@@ -380,71 +380,95 @@ async function answerStatus(): Promise<Answer> {
   }
 }
 
+/**
+ * "How much have I used?" — answered with the real plan windows.
+ *
+ * This used to answer in dollars, and every figure in it was invented twice
+ * over: the collector priced every token at one flat Sonnet rate whatever
+ * model actually ran, and the verdict compared that to a budget ceiling that
+ * had no bearing on when work would actually stop. On a subscription there is
+ * no per-token bill at all.
+ *
+ * So the question is now answered with the thing it was really asking: how
+ * full the 5-hour and weekly windows are, reported by the server itself. The
+ * token count comes along as the volume measure, because that number was
+ * always real — deduplicated by message id straight from the transcripts.
+ */
 async function answerSpend(): Promise<Answer> {
-  const [costs, tokens, settings] = await Promise.all([
-    api.getMetric('costs').catch(() => null),
+  const [usage, tokens] = await Promise.all([
+    (window.electronAPI?.claudeUsage
+      ? window.electronAPI.claudeUsage()
+      : api.usage()).catch(() => null),
     api.getMetric('tokens').catch(() => null),
-    // Budgets, so the answer can say whether the number is a problem. Asked
-    // "how much have I spent", the useful reply is not the figure alone — the
-    // old version reported 297 dollars without mentioning it was six times the
-    // limit, which is the entire point of having a limit.
-    api.getSettings().catch(() => null),
   ])
-
-  if (!costs) {
-    return {
-      intent: 'spend',
-      speech: 'I could not read the cost metrics.',
-      lines: ['costs.json unavailable — is the collector running?'],
-      source: 'local',
-    }
-  }
 
   /*
    * Presentation mode silences this answer rather than masking it.
    *
    * Hiding the figures on screen would achieve nothing here: this answer is
    * SPOKEN, and a call picks up the speakers. Masking the text while Piper
-   * reads "two hundred and ninety-seven dollars" aloud would be the illusion
-   * of privacy — worse than no feature, because you would rely on it.
+   * reads the numbers aloud would be the illusion of privacy — worse than no
+   * feature, because you would rely on it.
+   *
+   * Percentages of a rate limit would arguably be safe to say out loud, but
+   * the token volume in the same breath is not, and one gate is easier to
+   * trust than a per-figure rule.
    */
   if (presentationOn()) {
     return {
       intent: 'spend',
       speech: "Figures are hidden while you're presenting.",
-      lines: ['Spend hidden — turn off "Figures hidden" in the sidebar to see it.'],
+      lines: ['Usage hidden — turn off "Figures hidden" in the sidebar to see it.'],
       source: 'local',
     }
   }
 
-  const today = Number(costs.today ?? 0)
-  const weekly = Number(costs.weekly ?? 0)
-  const limit = Number(settings?.weeklyBudget ?? 0)
+  const windows = usage?.usage?.windows ?? null
+  const session = windows?.five_hour ?? null
+  const week = windows?.seven_day ?? null
 
-  // The verdict, not just the figure — and only when there is a budget to
-  // judge against. Silence here is honest: with no limit set, "that is fine"
-  // would be an opinion the data does not support.
-  const ratio = limit > 0 ? weekly / limit : 0
-  const verdict = ratio >= 1
-    ? `, which is ${overBy(weekly, limit)} your ${moneyAdjective(limit)} budget`
-    : ratio >= 0.9
-      ? `, close to your ${moneyAdjective(limit)} budget`
-      : limit > 0
-        ? `, comfortably inside your ${moneyAdjective(limit)} budget`
-        : ''
+  if (!session && !week) {
+    return {
+      intent: 'spend',
+      speech: vary('spend.unseen', [
+        "I haven't seen your usage yet — it turns up with the next answer.",
+        "Nothing recorded yet. Ask me anything else and it'll show up.",
+      ]),
+      lines: ['No plan-limit reading recorded yet (it arrives with the next CLI answer).'],
+      source: 'local',
+    }
+  }
+
+  /*
+   * The verdict, not just the figure — the same principle as the old budget
+   * answer, but against a real ceiling this time. Phrased on the window that
+   * is furthest along, since that is the one that will stop the work.
+   */
+  const worst = [session, week]
+    .filter(Boolean)
+    .sort((a: any, b: any) => b.usedPercent - a.usedPercent)[0] as any
+  const verdict = worst.usedPercent >= 95
+    ? ', so you are nearly out'
+    : worst.usedPercent >= 80
+      ? ', so it is worth pacing'
+      : ', plenty of room'
+
+  const said: string[] = []
+  if (session) said.push(`${Math.round(session.usedPercent)} per cent of your five hour window`)
+  if (week) said.push(`${Math.round(week.usedPercent)} per cent of the week`)
 
   return {
     intent: 'spend',
     speech: `${capitalise(vary('spend.lead', [
-      `${approxMoney(today)} today`,
-      `You're at ${approxMoney(today)} today`,
-      `${approxMoney(today)} so far today`,
-    ]))}, and ${approxMoney(weekly)} for the week${verdict}.`,
+      `You're at ${said.join(' and ')}`,
+      `${said.join(', and ')}`,
+      `Using ${said.join(' and ')}`,
+    ]))}${verdict}.`,
     lines: [
-      `today   $${today.toFixed(2)}`,
-      `week    $${weekly.toFixed(2)}`,
-      `month   $${Number(costs.monthly ?? 0).toFixed(2)}`,
+      session ? `session (5h)  ${session.usedPercent}% used` : '',
+      week ? `weekly (7d)   ${week.usedPercent}% used` : '',
       tokens ? `tokens today  ${Number(tokens.today ?? 0).toLocaleString()}` : '',
+      usage?.stale ? 'reading is not current — updates on the next answer' : '',
     ].filter(Boolean),
     source: 'local',
   }
