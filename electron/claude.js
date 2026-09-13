@@ -249,11 +249,48 @@ const GIT_TOOLS = [
  * is that `git push` stays out of reach, which bare `Bash` would hand back.
  */
 const VERIFY_TOOLS = [
+  // JS — senjoeru-synapse and the fsweb front end.
   'Bash(node --test:*)',
   'Bash(npm run:*)',
   'Bash(npm test:*)',
   'Bash(npx tsc:*)',
   'Bash(npx vitest:*)',
+  /*
+   * PHP — fsweb is Laravel 13 on Pest 4, and that is the repo Joel is actually
+   * assigned to. Without these, qa-engineer cannot run a single backend test
+   * there: exactly the gap that made it useless before, moved to another
+   * language.
+   *
+   * `php artisan` and the Pest binary specifically, not bare `php` — `php -r`
+   * runs arbitrary code, the same reason `node` is not granted bare.
+   */
+  'Bash(php artisan:*)',
+  'Bash(./vendor/bin/pest:*)',
+  'Bash(vendor/bin/pest:*)',
+  'Bash(composer:*)',
+];
+
+/**
+ * Reading Joel's pull requests.
+ *
+ * He opens PRs on fsweb himself, Copilot reviews them automatically, and he
+ * then asks the team to judge each comment as worth applying or a false
+ * positive. Without `gh` that means pasting every comment by hand, which is
+ * the manual step the whole workflow was meant to remove.
+ *
+ * Read-only subcommands only. `gh pr merge`, `gh pr create` and `gh pr close`
+ * are deliberately absent for the same reason `git push` is: he owns every
+ * outward-facing action on that repo.
+ *
+ * Requires the GitHub CLI to be installed; if it is not, these simply never
+ * match anything and the rest still works.
+ */
+const PR_TOOLS = [
+  'Bash(gh pr view:*)',
+  'Bash(gh pr diff:*)',
+  'Bash(gh pr list:*)',
+  'Bash(gh pr checks:*)',
+  'Bash(gh api:*)',
 ];
 
 /**
@@ -272,7 +309,7 @@ const TEAM_TOOLS = ['Task', 'TodoWrite', 'WebSearch', 'WebFetch'];
 
 /** Everything the CLI may use here — and everything a subagent inherits. */
 const GRANTED_TOOLS = [
-  ...ALLOWED_TOOLS, ...GIT_TOOLS, ...VERIFY_TOOLS, ...TEAM_TOOLS,
+  ...ALLOWED_TOOLS, ...GIT_TOOLS, ...VERIFY_TOOLS, ...TEAM_TOOLS, ...PR_TOOLS,
 ];
 
 /**
@@ -333,8 +370,34 @@ const CAPABILITY_NOTE = [
 function extraDirs() {
   try {
     const { getConfig } = require('../shared/workspace-config');
-    const kit = getConfig()?.paths?.joeruKitDir;
-    return kit && fs.existsSync(kit) ? [kit] : [];
+    const cfg = getConfig();
+
+    /*
+     * The kit AND every repo Joel has configured.
+     *
+     * Only the kit used to be here, which left fsweb — the repo he is actually
+     * assigned to — formally out of scope while agents reached into it anyway.
+     * That is the worst of both: access that works by accident rather than by
+     * declaration, and which I described wrongly as being contained when it
+     * was not. Naming the repos makes the scope match reality.
+     *
+     * `repoPaths` is already populated from metrics/config.json — the repos
+     * were configured all along, this just stopped ignoring them.
+     */
+    const dirs = [cfg?.paths?.joeruKitDir, ...(cfg?.repoPaths || [])];
+
+    // Deduped and existence-checked: --add-dir on a path that is not there
+    // makes the CLI complain, and the cwd repo appears in repoPaths too.
+    const seen = new Set();
+    const out = [];
+    for (const d of dirs) {
+      if (!d) continue;
+      const key = path.resolve(d).toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (fs.existsSync(d)) out.push(d);
+    }
+    return out;
   } catch {
     return [];
   }
