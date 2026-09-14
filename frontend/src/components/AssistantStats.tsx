@@ -25,7 +25,7 @@ import { count, usePresentationMode } from '@/lib/presentation'
 import { formatBytes } from '@/lib/utils'
 import { useAgentActivity } from '@/lib/useAgentActivity'
 import { toolIcon } from '@/lib/tool-icons'
-import { displayAgentName, elapsed, sortDispatches } from '@/lib/agent-display'
+import { displayAgentName, runtimeOf, sortDispatches } from '@/lib/agent-display'
 import UsageLimits from './UsageLimits'
 
 /** Slow enough to be free, quick enough that a completed task shows up. */
@@ -273,8 +273,12 @@ function DispatchTile() {
           : entry.status === 'failed' ? <span className="w-1.5 h-1.5 rounded-full bg-error shrink-0" />
             : <span className="w-1.5 h-1.5 rounded-full bg-primary shrink-0 animate-pulse" />}
         <span className="font-semibold truncate">{displayAgentName(entry.agentType)}</span>
+        {/* "finished" earns its width here: without it a frozen number and a
+            running one look identical, which is the confusion this tile is
+            supposed to remove. */}
         <span className="ml-auto text-[9px] text-gray-500 shrink-0 tabular-nums">
-          {elapsed(now - entry.startedAt)}
+          {runtimeOf(entry, now)}
+          {entry.status === 'done' && ' · done'}
         </span>
       </div>
       {entry.current ? (

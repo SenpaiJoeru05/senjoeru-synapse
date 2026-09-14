@@ -9,7 +9,7 @@ import { useRealtime, useTasks } from '@/lib/realtime'
 import { repoDot } from '@/lib/repo-color'
 import { useAgentActivity, type AgentActivityEntry } from '@/lib/useAgentActivity'
 import { toolIcon } from '@/lib/tool-icons'
-import { displayAgentName, elapsed, sortDispatches } from '@/lib/agent-display'
+import { displayAgentName, runtimeOf, sortDispatches } from '@/lib/agent-display'
 
 interface Member {
   slug: string
@@ -99,7 +99,7 @@ function DispatchCard({ entry, now }: { entry: AgentActivityEntry; now: number }
         <span className="font-semibold truncate">{displayAgentName(entry.agentType)}</span>
         {entry.repo && <span className="text-gray-600 truncate">· {entry.repo}</span>}
         <span className="ml-auto text-[11px] text-gray-500 shrink-0 tabular-nums">
-          {elapsed(now - entry.startedAt)}
+          {runtimeOf(entry, now)}
           {entry.status === 'done' && ' · finished'}
           {entry.status === 'failed' && ' · failed'}
         </span>

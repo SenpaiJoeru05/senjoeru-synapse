@@ -182,12 +182,25 @@ class AgentActivityService {
     entry.lastMessage = event.last_assistant_message || null;
   }
 
-  /** Drop `done` entries whose grace window has elapsed. Called on a timer. */
+  /**
+   * Drop `done` entries whose grace window has elapsed. Called on a timer.
+   *
+   * Returns how many were removed, because a removal is only real once the
+   * UI hears about it: the caller has to broadcast, and broadcasting on every
+   * tick regardless would push an identical frame every 15s forever.
+   *
+   * @returns {number} entries removed
+   */
   sweep() {
     const cutoff = this.now() - DONE_TTL_MS;
+    let removed = 0;
     for (const [id, entry] of this.agents) {
-      if (entry.status === 'done' && entry.lastEventAt < cutoff) this.agents.delete(id);
+      if (entry.status === 'done' && entry.lastEventAt < cutoff) {
+        this.agents.delete(id);
+        removed += 1;
+      }
     }
+    return removed;
   }
 
   /** Every current entry, safe to JSON-serialize directly. */

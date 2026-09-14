@@ -196,14 +196,21 @@ test('sweep removes a done entry only after its TTL, and only if done', () => {
   // a2 is still 'starting', not done - must survive the sweep regardless of age.
 
   c.advance(DONE_TTL_MS - 1);
-  svc.sweep();
+  assert.equal(svc.sweep(), 0, 'nothing expired yet');
   assert.equal(svc.snapshot().length, 2, 'not expired yet');
 
   c.advance(2);
-  svc.sweep();
+  assert.equal(svc.sweep(), 1, 'reports what it removed');
   const remaining = svc.snapshot();
   assert.equal(remaining.length, 1);
   assert.equal(remaining[0].agentId, 'a2');
+
+  // The count is what the server broadcasts on, so a sweep that removes
+  // nothing must say so — otherwise an identical frame goes out every 15s
+  // forever. The inverse bug (never broadcasting at all) is what left a
+  // finished dispatch on screen indefinitely the first time this ran live.
+  c.advance(DONE_TTL_MS * 2);
+  assert.equal(svc.sweep(), 0, 'a still-running entry is never swept');
 });
 
 test('defaultResolveRepo takes the basename of whichever separator the path uses', () => {

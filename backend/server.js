@@ -730,7 +730,14 @@ function scheduleActivityBroadcast() {
 if (agentActivityService) {
   // Unref'd, matching the CPU sampler convention: this timer must never be
   // the reason the process stays alive.
-  setInterval(() => agentActivityService.sweep(), 15_000).unref();
+  //
+  // The broadcast is the point, not the sweep. Dropping an entry from the map
+  // is invisible to a client that is only ever told about hook arrivals, so
+  // without this a finished card stayed on screen until some unrelated
+  // dispatch happened to push a new frame.
+  setInterval(() => {
+    if (agentActivityService.sweep() > 0) scheduleActivityBroadcast();
+  }, 15_000).unref();
 }
 
 let refreshTimer = null;

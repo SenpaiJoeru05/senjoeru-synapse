@@ -24,6 +24,20 @@ export function elapsed(ms: number): string {
 }
 
 /**
+ * How long a dispatch ran — frozen once it is over.
+ *
+ * A finished dispatch measured against `now` keeps counting up, which is the
+ * exact thing this feature exists to stop: the first real test of it showed
+ * a completed Explore still ticking, and the only honest reading of a rising
+ * number is "still running". Once the agent stops, the duration is a fact
+ * about the past and must stop moving.
+ */
+export function runtimeOf(entry: { status: string; startedAt: number; lastEventAt: number }, now: number): string {
+  const end = entry.status === 'done' || entry.status === 'failed' ? entry.lastEventAt : now
+  return elapsed(end - entry.startedAt)
+}
+
+/**
  * Working/starting first, then most recently active — the ordering both the
  * full dispatch grid (Team.tsx) and the single-entry tiles (AssistantStats,
  * the <700px header chip) use to decide what to show first.
