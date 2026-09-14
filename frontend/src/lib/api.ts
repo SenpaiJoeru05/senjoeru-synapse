@@ -72,6 +72,16 @@ export const api = {
     return response.data
   },
 
+  // Initial paint for live agent-DISPATCH status (a subagent's tool-by-tool
+  // activity while it runs) — realtime updates arrive over WS as
+  // agent-activity:update. See useAgentActivity(). Named distinctly from
+  // getAgentActivity() below, which is a different, pre-existing endpoint
+  // (/observation/agent-activity — a historical log, not a live dispatch).
+  async getDispatchActivity(): Promise<any> {
+    const response = await axios.get(`${API_BASE_URL}/agent-activity`)
+    return response.data
+  },
+
   // ── SQLite-backed (permanent) data ──────────────────────────────────────
   async getDbTasks(): Promise<any> {
     const response = await axios.get(`${API_BASE_URL}/tasks`)

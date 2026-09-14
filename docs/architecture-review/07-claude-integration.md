@@ -72,8 +72,11 @@ Synapse's `GET /api/claude/info` probes for the subdirectories `agents, sessions
 
 ## Hooks
 
-- **No Claude Code hooks are configured for Synapse.** `.claude/settings.json` (global) contains only `{ theme, effortLevel, model }`; there is no `hooks` block.
-- Synapse's own reactivity comes from `chokidar` **filesystem watchers**, not Claude hooks — see [10-runtime.md](10-runtime.md).
+- **Five subagent hooks are configured**, written into the global `~/.claude/settings.json` by `joeru-kit build` (`bin/joeru-kit.js` → `buildHooks`), not by hand: `SubagentStart`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `SubagentStop`. They exist only to feed live dispatch status to Synapse — see [AGENT-ACTIVITY-VISIBILITY.md](../plans/AGENT-ACTIVITY-VISIBILITY.md).
+- Each is a `type: "command"` hook running `joeru-kit/bin/hook-forward.js`, which POSTs the hook's stdin JSON to `POST /api/agent-events` with an 800ms timeout and always exits cleanly.
+  - **They are `command` hooks, not `http` hooks, and that is load-bearing.** Only `command` hooks support `async: true` (genuine fire-and-forget — Claude Code neither waits nor checks the exit code). `http` hooks have no `async` option at all and block by default, so wiring these as `http` would have put Synapse's availability on the critical path of every tool call in every dispatch. Verified against the Claude Code hooks documentation, and then by measurement: baseline vs. hooks-pointed-at-a-dead-port showed no consistent latency difference across three trials each.
+- Synapse's reactivity is otherwise still `chokidar` **filesystem watchers** — see [10-runtime.md](10-runtime.md). The hooks are the one inbound push path; everything else Synapse knows, it observes.
+- Nothing degrades when Synapse is down. The forwarder's POST fails, the hook exits 0, and the dispatch proceeds identically.
 
 ---
 

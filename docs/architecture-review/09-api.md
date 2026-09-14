@@ -17,8 +17,10 @@
 | POST | `/api/settings` | Write `config.json` |
 | GET | `/api/settings/detect-repos` | Auto-detect git repos from Claude sessions |
 | GET | `/api/agent-network` | Laid-out React Flow graph + activity (initial paint) |
+| POST | `/api/agent-events` | Claude Code hook sink — live subagent dispatch events |
+| GET | `/api/agent-activity` | Current live dispatches (initial paint) |
 | POST | `/api/internal/graph-refresh` | Collector → backend "rebuild+broadcast" trigger |
-| WS | `/ws` | Push `metrics:update` + `agent-network:update` frames |
+| WS | `/ws` | Push `metrics:update` + `agent-network:update` + `agent-activity:update` frames |
 
 ---
 
@@ -121,6 +123,29 @@
 ```
 - **Errors:** never throws — on failure returns an empty-but-valid graph with an `error` field.
 
+## POST `/api/agent-events`
+- **File:** [backend/routes/agent-activity.js](../../backend/routes/agent-activity.js).
+- **Purpose:** the sink for Claude Code's subagent hooks — Synapse's **only inbound integration point**. Everything else it knows, it observes from the filesystem.
+- **Caller:** `joeru-kit/bin/hook-forward.js`, never a browser.
+- **Request body:** the hook's own JSON payload, verbatim (`hook_event_name`, `agent_id`, `agent_type`, `session_id`, `cwd`, `tool_name`, `tool_input`, `tool_use_id`, …).
+- **Response:** always `{ "ok": true }`.
+- **Errors: none, by design.** Malformed bodies and unknown event names are accepted and dropped. The caller is a fire-and-forget hook that ignores the response, so a 4xx/5xx here would buy nothing and risk noise in a dispatch's critical path.
+- **Ignored silently:** events with no `agent_id` — that is the parent thread's own tool calls, which these globally-configured hooks also fire for and which this feature is not about.
+- **Side effect:** schedules an `agent-activity:update` broadcast (120ms debounce).
+
+## GET `/api/agent-activity`
+- **File:** [backend/routes/agent-activity.js](../../backend/routes/agent-activity.js).
+- **Purpose:** current live dispatches, for initial paint before the first WS push.
+- **Not to be confused with** `/api/observation/agent-activity`, which is a historical log. The client method is named `getDispatchActivity()` for that reason.
+- **Response:**
+```json
+{ "agents": [ { "agentId": "…", "agentType": "backend-engineer", "repo": "fsweb",
+                "status": "working", "startedAt": 0, "lastEventAt": 0,
+                "current": { "tool": "Read", "detail": "Reading foo.ts", "icon": "file-text", "status": "running", "at": 0 },
+                "recent": [ /* last 5, same shape */ ], "toolCallCount": 0, "lastMessage": null } ] }
+```
+- **Storage:** in-memory only, never SQLite — this is transient live state, regeneratable and worthless once stale (matches ARCHITECTURE-V2's ownership matrix). Finished entries are swept 60s after they complete.
+
 ## POST `/api/internal/graph-refresh`
 - **Purpose:** internal hook. The collector calls this after each poll to trigger a debounced rebuild + broadcast.
 - **Request body:** empty `{}`.
@@ -132,7 +157,7 @@
 ## WebSocket `/ws`
 
 - **Purpose:** push live updates so the UI never polls.
-- **On connect:** the server immediately sends the current `agent-network:update` frame **and** the current `metrics:update` frame (instant paint).
+- **On connect:** the server immediately sends the current `agent-network:update`, `metrics:update` **and** `agent-activity:update` frames (instant paint).
 - **On collector activity:** after `/api/internal/graph-refresh`, the server (debounced 300ms) rebuilds and broadcasts each frame **only if its content changed** (dedupe via stored `lastPayloadStr` / `lastMetricsStr`).
 
 **Frame types:**
@@ -150,8 +175,16 @@
   "nodes": [...], "edges": [...], "activity": [...] }
 ```
 
+`agent-activity:update`
+```json
+{ "type": "agent-activity:update", "timestamp": "ISO",
+  "agents": [ /* same shape as GET /api/agent-activity */ ] }
+```
+- Driven by hook arrivals, **not** by the collector's poll, so it has its own 120ms debounce rather than riding the 300ms cycle above. A subagent's tool calls land in bursts; 300ms would make a fast sequence of actions look like one.
+
 - **Change detection detail:** the graph diff keys on `nodes`, `edges`, and activity's stable fields (`type/title/description/icon`) — ignoring per-poll ids and relative timestamps so identical states never rebroadcast. The metrics diff keys on the `metrics` object only (volatile host health is excluded from the comparison but still sent).
-- **Client handling:** the metrics hook reads only `metrics:update`; the graph hook reads only `agent-network:update`.
+- **Client handling:** the metrics hook reads only `metrics:update`; the graph hook reads only `agent-network:update`; `useAgentActivity()` reads only `agent-activity:update`.
+- **Two client connection patterns exist.** Most pages share `RealtimeProvider`'s single socket. `useAgentNetwork()` and `useAgentActivity()` each open their own, because the Agent Network page and the Assistant Mode window both render outside/before that provider mounts.
 
 ---
 

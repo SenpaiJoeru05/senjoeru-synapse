@@ -22,6 +22,9 @@ import { api } from '../lib/api'
 import VoiceOrb from '../components/VoiceOrb'
 import Markdown from '../components/Markdown'
 import AssistantStats, { useWideEnough } from '../components/AssistantStats'
+import { useAgentActivity } from '../lib/useAgentActivity'
+import { toolIcon } from '../lib/tool-icons'
+import { displayAgentName, sortDispatches } from '../lib/agent-display'
 import type { AssistantInsights } from '../electron'
 import { currentState, ground, type Exchange } from '../lib/grounding'
 import { acknowledgement } from '../lib/acknowledge'
@@ -223,6 +226,39 @@ function LearnedPanel() {
           </p>
         </div>
       )}
+    </div>
+  )
+}
+
+/**
+ * Below the width AssistantStats needs, this is the whole view into a
+ * running dispatch: one line, icon + agent + current action, no elapsed
+ * clock or history trail — those cost width this size does not have.
+ *
+ * Same absent-when-empty rule as the wide rail's DispatchTile: nothing
+ * running renders nothing, not an idle chip.
+ */
+function DispatchChip() {
+  const { agents } = useAgentActivity()
+  if (agents.length === 0) return null
+  const entry = sortDispatches(agents)[0]
+  const working = entry.status === 'working' || entry.status === 'starting'
+  const CurrentIcon = entry.current ? toolIcon(entry.current.icon) : null
+
+  return (
+    <div className="flex items-center gap-1.5 px-4 py-1 text-[10px] text-gray-400 border-b border-white/5 shrink-0">
+      {entry.status === 'done' ? <span className="w-1.5 h-1.5 rounded-full bg-success shrink-0" />
+        : entry.status === 'failed' ? <span className="w-1.5 h-1.5 rounded-full bg-error shrink-0" />
+          : <span className="w-1.5 h-1.5 rounded-full bg-primary shrink-0 animate-pulse" />}
+      <span className="font-semibold text-gray-300 shrink-0">{displayAgentName(entry.agentType)}</span>
+      {entry.current && (
+        <>
+          {CurrentIcon && <CurrentIcon className="w-3 h-3 text-primary/80 shrink-0" />}
+          <span className="truncate">{entry.current.detail}</span>
+        </>
+      )}
+      {!entry.current && entry.status === 'done' && <span className="truncate">finished</span>}
+      {working && !entry.current && <span className="truncate">starting…</span>}
     </div>
   )
 }
@@ -1154,6 +1190,13 @@ export default function Assistant() {
           </button>
         </div>
       </div>
+
+      {/*
+        The narrow-window view into a running dispatch — AssistantStats isn't
+        mounted at all below RAIL_MIN_WIDTH, so without this a dispatch in
+        progress would be invisible in the window's default size.
+      */}
+      {!wide && <DispatchChip />}
 
       {/*
         The stage: sphere centred in whatever room is left, caption beneath it.

@@ -23,6 +23,9 @@ import {
 import { api } from '@/lib/api'
 import { count, usePresentationMode } from '@/lib/presentation'
 import { formatBytes } from '@/lib/utils'
+import { useAgentActivity } from '@/lib/useAgentActivity'
+import { toolIcon } from '@/lib/tool-icons'
+import { displayAgentName, elapsed, sortDispatches } from '@/lib/agent-display'
 import UsageLimits from './UsageLimits'
 
 /** Slow enough to be free, quick enough that a completed task shows up. */
@@ -240,6 +243,57 @@ function Tile({ icon: Icon, label, value, tone = 'normal' }: {
   )
 }
 
+/**
+ * The single most-active dispatch, one line, for the rail this window
+ * actually has room for. Full multi-card detail (recent-action trail, per-
+ * card indeterminate stripe) lives on Team.tsx's "Active Dispatches" — this
+ * is the glanceable version, not a second copy of that page.
+ *
+ * Absent entirely with no dispatches running, same as Team.tsx: nothing here
+ * to look at is a fact worth showing as no tile, not an idle placeholder.
+ */
+function DispatchTile() {
+  const { agents } = useAgentActivity()
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(t)
+  }, [])
+
+  if (agents.length === 0) return null
+
+  const entry = sortDispatches(agents)[0]
+  const working = entry.status === 'working' || entry.status === 'starting'
+  const CurrentIcon = entry.current ? toolIcon(entry.current.icon) : null
+
+  return (
+    <div className={`glass rounded-xl px-2.5 py-2 ${working ? 'border border-primary/25' : ''}`}>
+      <div className="flex items-center gap-1.5 text-[11px]">
+        {entry.status === 'done' ? <span className="w-1.5 h-1.5 rounded-full bg-success shrink-0" />
+          : entry.status === 'failed' ? <span className="w-1.5 h-1.5 rounded-full bg-error shrink-0" />
+            : <span className="w-1.5 h-1.5 rounded-full bg-primary shrink-0 animate-pulse" />}
+        <span className="font-semibold truncate">{displayAgentName(entry.agentType)}</span>
+        <span className="ml-auto text-[9px] text-gray-500 shrink-0 tabular-nums">
+          {elapsed(now - entry.startedAt)}
+        </span>
+      </div>
+      {entry.current ? (
+        <div className="mt-1 flex items-center gap-1 text-[10px] text-gray-400">
+          {CurrentIcon && <CurrentIcon className="w-3 h-3 text-primary/80 shrink-0" />}
+          <span className="truncate">{entry.current.detail}</span>
+        </div>
+      ) : entry.status === 'done' && entry.lastMessage ? (
+        <p className="mt-1 text-[10px] text-gray-400 line-clamp-2">&ldquo;{entry.lastMessage}&rdquo;</p>
+      ) : null}
+      {working && (
+        <div className="mt-1.5 h-0.5 rounded-full bg-white/5 overflow-hidden">
+          <div className="h-full w-1/3 rounded-full bg-primary/60 animate-[indeterminate_1.4s_ease-in-out_infinite]" />
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function AssistantStats() {
   const presenting = usePresentationMode()
   const [snap, setSnap] = useState<Snapshot | null>(null)
@@ -403,6 +457,14 @@ export default function AssistantStats() {
         that one is dollars Joel chose, this one is the cap he cannot exceed.
       */}
       <UsageLimits compact />
+
+      {/*
+        What Joeru is delegating right now, if anything — fed by the same
+        subagent hooks as Team.tsx's "Active Dispatches". This is the rail's
+        only view into it, since this window renders before RealtimeProvider
+        exists; see useAgentActivity()'s own independent socket.
+      */}
+      <DispatchTile />
 
       {snap.topAttention && (
         <div className="glass rounded-xl px-2.5 py-2">

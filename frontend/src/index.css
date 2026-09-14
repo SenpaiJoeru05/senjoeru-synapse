@@ -73,3 +73,17 @@
   from { opacity: 0 }
   to   { opacity: 1 }
 }
+
+/*
+ * The indeterminate dispatch stripe (Team.tsx's ActiveDispatches).
+ *
+ * A direction, not a fraction - there is no reliable total-step count for a
+ * dispatched subagent, so a percentage would be invented precision. This
+ * slides back and forth the way an indeterminate progress indicator should:
+ * clearly "something is happening", never claiming to know how much is left.
+ */
+@keyframes indeterminate {
+  0%   { transform: translateX(-100%) }
+  50%  { transform: translateX(150%) }
+  100% { transform: translateX(-100%) }
+}

@@ -1,9 +1,15 @@
 import { useEffect, useMemo, useState } from 'react'
 import { motion } from 'framer-motion'
-import { Users, Brain, RefreshCw, Cpu, Zap, Briefcase, GitBranch, ChevronDown } from 'lucide-react'
+import {
+  Users, Brain, RefreshCw, Cpu, Zap, Briefcase, GitBranch, ChevronDown, ChevronRight,
+  Activity, CheckCircle2,
+} from 'lucide-react'
 import { api } from '@/lib/api'
 import { useRealtime, useTasks } from '@/lib/realtime'
 import { repoDot } from '@/lib/repo-color'
+import { useAgentActivity, type AgentActivityEntry } from '@/lib/useAgentActivity'
+import { toolIcon } from '@/lib/tool-icons'
+import { displayAgentName, elapsed, sortDispatches } from '@/lib/agent-display'
 
 interface Member {
   slug: string
@@ -64,6 +70,124 @@ function initials(name: string): string {
 }
 
 interface Live { working: boolean; activeRepo: string | null; lastUpdate: string | null; status: string }
+
+/**
+ * One dispatched subagent's card.
+ *
+ * No progress bar filling to a percentage — there is no reliable total-step
+ * count for a dispatched subagent, so a number would be invented to look
+ * precise. The same failure this codebase already rejected once for the CPU
+ * gauge: an idle machine mid-measurement drawing an empty dial is a lie the
+ * viewer cannot detect. An indeterminate stripe is honest about the one
+ * thing that IS real: something is happening, right now.
+ */
+function DispatchCard({ entry, now }: { entry: AgentActivityEntry; now: number }) {
+  const [open, setOpen] = useState(false)
+  const working = entry.status === 'working' || entry.status === 'starting'
+  const CurrentIcon = entry.current ? toolIcon(entry.current.icon) : null
+
+  return (
+    <div className={`rounded-xl border p-3 ${
+      entry.status === 'failed' ? 'border-error/30 bg-error/[0.04]'
+        : working ? 'border-primary/25 bg-primary/[0.04]' : 'border-white/10 bg-surface2'
+    }`}
+    >
+      <div className="flex items-center gap-2 text-sm">
+        {entry.status === 'done' ? <CheckCircle2 className="w-4 h-4 text-success shrink-0" />
+          : entry.status === 'failed' ? <Activity className="w-4 h-4 text-error shrink-0" />
+            : <span className="w-2 h-2 rounded-full bg-primary shrink-0 animate-pulse" />}
+        <span className="font-semibold truncate">{displayAgentName(entry.agentType)}</span>
+        {entry.repo && <span className="text-gray-600 truncate">· {entry.repo}</span>}
+        <span className="ml-auto text-[11px] text-gray-500 shrink-0 tabular-nums">
+          {elapsed(now - entry.startedAt)}
+          {entry.status === 'done' && ' · finished'}
+          {entry.status === 'failed' && ' · failed'}
+        </span>
+      </div>
+
+      {entry.current && (
+        <div className="mt-2 flex items-center gap-1.5 text-[12px] text-gray-300">
+          {CurrentIcon && <CurrentIcon className="w-3.5 h-3.5 text-primary/80 shrink-0" />}
+          <span className="truncate">{entry.current.detail}</span>
+          <span className="ml-auto text-[10px] text-gray-600 shrink-0">{entry.toolCallCount} actions</span>
+        </div>
+      )}
+
+      {working && (
+        <div className="mt-2 h-1 rounded-full bg-white/5 overflow-hidden">
+          {/* Indeterminate: a direction, not a fraction. See the note above. */}
+          <div className="h-full w-1/3 rounded-full bg-primary/60 animate-[indeterminate_1.4s_ease-in-out_infinite]" />
+        </div>
+      )}
+
+      {entry.status === 'done' && entry.lastMessage && (
+        <p className="mt-2 text-[12px] text-gray-400 line-clamp-2">&ldquo;{entry.lastMessage}&rdquo;</p>
+      )}
+
+      {entry.recent.length > 0 && (
+        <button
+          onClick={() => setOpen((v) => !v)}
+          className="mt-2 flex items-center gap-1 text-[10px] uppercase tracking-wide text-gray-600 hover:text-gray-400"
+        >
+          {open ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+          {entry.toolCallCount} action{entry.toolCallCount === 1 ? '' : 's'}
+        </button>
+      )}
+      {open && (
+        <div className="mt-1.5 flex flex-wrap gap-1.5">
+          {entry.recent.map((a, i) => {
+            const Icon = toolIcon(a.icon)
+            return (
+              <span
+                key={i}
+                title={a.detail}
+                className={`flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] ${
+                  a.status === 'failed' ? 'bg-error/10 text-error' : 'bg-white/5 text-gray-400'
+                }`}
+              >
+                <Icon className="w-2.5 h-2.5" />
+                <span className="max-w-[8rem] truncate">{a.detail}</span>
+              </span>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
+ * What Joeru delegates while it happens — not just a notification once it
+ * lands. Fed by Claude Code's own subagent hooks; see docs/plans/
+ * AGENT-ACTIVITY-VISIBILITY.md for the full design.
+ *
+ * Absent entirely with zero entries, not an empty placeholder card — the
+ * standing pattern this dashboard already uses (task 20's "show what
+ * matters", task 24's null-vs-zero discipline).
+ */
+function ActiveDispatches() {
+  const { agents } = useAgentActivity()
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(t)
+  }, [])
+
+  if (agents.length === 0) return null
+
+  const sorted = sortDispatches(agents)
+
+  return (
+    <div className="mb-6 glass-card !p-4">
+      <h2 className="text-sm font-semibold text-gray-300 mb-3 flex items-center gap-2">
+        <Zap className="w-4 h-4 text-primary" /> Active Dispatches
+      </h2>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        {sorted.map((e) => <DispatchCard key={e.agentId} entry={e} now={now} />)}
+      </div>
+    </div>
+  )
+}
 
 function MemberCard({ m, live, tasks, index }: { m: Member; live: Live; tasks: Task[]; index: number }) {
   const [showMemory, setShowMemory] = useState(false)
@@ -245,6 +369,8 @@ export default function Team() {
           ))}
         </div>
       )}
+
+      <ActiveDispatches />
 
       {loading && team.length === 0 ? (
         <div className="text-gray-400 text-sm">Loading team…</div>
