@@ -29,6 +29,23 @@ interface SystemHealth {
 const STATUS_SORT: Record<string, number> = {
   working: 0, reviewing: 1, pending: 2, completed: 3, failed: 4,
 }
+/*
+ * An unrecognised status sorts ABOVE every known one, not below.
+ *
+ * The widget below only shows the top ten, and the old fallback (99) put an
+ * unmapped status last — worse than "completed", worse than "failed". A task
+ * was created with status "New", which this board's actual vocabulary
+ * (Pending/Working/Reviewing/Completed/Failed) has never included, and it
+ * silently ranked 31st of 31 real tasks: buried under every historical
+ * completed task, on a widget meant to surface what needs attention now.
+ *
+ * The right long-term fix is the same one applied to that task directly —
+ * write a real status. This is the fallback for the next time a status does
+ * not match the vocabulary, and an unfamiliar status is far more likely to be
+ * a new, unhandled case worth looking at than something safe to hide below
+ * finished work — so it defaults to maximum visibility, not minimum.
+ */
+const UNKNOWN_STATUS_SORT = -1
 const STATUS_BAR: Record<string, string> = {
   working:   'bg-primary',
   reviewing: 'bg-secondary',
@@ -201,8 +218,8 @@ export default function Overview() {
 
   // Sort: Working → Reviewing → Pending → Completed → Failed, then most recent first
   const sortedTasks = [...allTasks].sort((a, b) => {
-    const sa = STATUS_SORT[a.status?.toLowerCase() ?? ''] ?? 99
-    const sb = STATUS_SORT[b.status?.toLowerCase() ?? ''] ?? 99
+    const sa = STATUS_SORT[a.status?.toLowerCase() ?? ''] ?? UNKNOWN_STATUS_SORT
+    const sb = STATUS_SORT[b.status?.toLowerCase() ?? ''] ?? UNKNOWN_STATUS_SORT
     if (sa !== sb) return sa - sb
     return new Date(b.lastUpdated ?? 0).getTime() - new Date(a.lastUpdated ?? 0).getTime()
   })
