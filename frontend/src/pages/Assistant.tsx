@@ -663,6 +663,17 @@ export default function Assistant() {
        */
       acked = speakAck(q)
 
+      /*
+       * Hoisted out of the Claude branch below.
+       *
+       * `state` used to be declared inside that branch's `try`, which is fine
+       * right up until the OpenCode fallback — reached from OUTSIDE that
+       * block — also needs it to ground its own prompt. A `const` inside a
+       * `try` does not survive past it, so reaching for the same name down
+       * there was a ReferenceError waiting to happen, not a working fallback.
+       */
+      let state: string | null = null
+
       // Claude Code first, OpenCode as the backstop.
       //
       // Measured: `claude -p --model haiku` answers in ~6-8s and already knows
@@ -675,7 +686,7 @@ export default function Assistant() {
           // Hand it the live numbers. Without them it invents a summary of the
           // board and asks the user to supply the answer — observed, not
           // hypothetical. See lib/grounding.ts.
-          const state = await currentState()
+          state = await currentState()
 
           /*
            * Watch what it touches while it works.
@@ -751,14 +762,64 @@ export default function Assistant() {
             return
           }
         } catch (e: any) {
-          // Quota, auth or a missing CLI. Fall through to OpenCode rather than
-          // failing outright — that is the point of having two.
+          /*
+           * A TIMEOUT does not fall through. Everything else still does.
+           *
+           * This used to treat every failure the same way — quota, auth, a
+           * missing binary, and a slow answer all landed here and all got
+           * silently handed to OpenCode. That was wrong for a timeout
+           * specifically: it does not mean Claude is unavailable, it means
+           * Claude was still working, most likely mid-delegation to a real
+           * specialist. Falling back mid-delegation is how "plan a feature"
+           * once got answered by a model that had never seen the request —
+           * OpenCode's session shares nothing with Claude's, so it filled the
+           * gap with whatever it could find in memory and invented a task.
+           *
+           * Genuine unavailability — no CLI installed, not logged in, quota
+           * exhausted — is a real reason to fall back, and stays one. A
+           * timeout is not that, so it gets its own honest answer instead of
+           * a stranger's guess.
+           */
+          const timedOut = /did not answer within/i.test(String(e?.message ?? e))
+          if (timedOut) {
+            const msg = 'That took longer than expected — Claude was still working '
+              + 'rather than unavailable, so I did not hand it to a different model '
+              + 'mid-task. Ask again, or give it a narrower question.'
+            await acked
+            log('failed')
+            remember(q, msg, 'claude')
+            setTurns((t) => [...t.slice(0, -1), {
+              question: q,
+              answer: { intent: 'ask', speech: msg, lines: [], source: 'claude' },
+            }])
+            await speakAnswer(msg)
+            return
+          }
           setStatus(`Claude unavailable (${e?.message ?? e}); trying Joeru…`)
         }
       }
 
       const sessionId = await ensureSession()
-      const reply = await api.joeruSend(sessionId, q, AGENT, MODEL)
+      /*
+       * Grounded, not bare — the same state and recent history Claude would
+       * have gotten.
+       *
+       * This is the actual fallback path now (genuine unavailability, not a
+       * timeout), so it still needs hardening: without this, OpenCode
+       * answered a completely blind question, sharing no session with
+       * whatever had been discussed. It is a different provider and always
+       * will be, but it does not need to be a stranger too.
+       *
+       * `state` may still be null here — the Claude branch above is skipped
+       * entirely when window.electronAPI is absent (dev:web), or its own
+       * fetch may have failed before assignment. Re-fetched rather than left
+       * blank; a failed re-fetch falls back to an empty string, which
+       * `ground()` tolerates, rather than throwing and losing the turn.
+       */
+      const groundState = state ?? await currentState().catch(() => '')
+      const reply = await api.joeruSend(
+        sessionId, ground(q, groundState, recentRef.current), AGENT, MODEL,
+      )
 
       // A provider failure arrives as a 200 with the error on the message, so
       // check for it before concluding the reply was empty.

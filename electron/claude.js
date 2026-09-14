@@ -140,8 +140,30 @@ const VOICE_STYLE = [
   'delivered in a confident voice is the worst thing you can produce here.',
 ].join(' ');
 
-/** A question that has not answered in this long is not going to. */
-const TIMEOUT_MS = 90_000;
+/**
+ * A question that has not answered in this long is not going to — except that
+ * "this long" changed meaning.
+ *
+ * 90s was right when Assistant Mode could only look things up. It is wrong now
+ * that Joeru can genuinely delegate: a real "plan this, then build it" request
+ * spawns a specialist and waits on it, which routinely takes minutes, not
+ * seconds — I measured real delegated calls earlier and they were not fast.
+ *
+ * The old value did not just make slow answers fail, it made them fail
+ * SILENTLY WRONG: the frontend caught the timeout and treated it identically
+ * to the CLI being missing or unauthenticated, so it fell back to OpenCode's
+ * `nemotron-3-ultra-free` mid-delegation — a different provider, a different
+ * session, one that had never seen the conversation. Reported live: asked to
+ * plan a feature, that fallback had no idea what "it" referred to and
+ * invented a task from whatever it could find in memory instead.
+ *
+ * Matched to Chat's own ceiling (CHAT_TIMEOUT_MS below) rather than picked
+ * independently, so the two do not silently drift apart again. The wait is
+ * not blind either way: the tool-activity strip already shows what is
+ * happening turn by turn, so ten minutes of real work reads as visible
+ * progress, not silence.
+ */
+const TIMEOUT_MS = 600_000;
 
 /**
  * Tools Joeru may use here, and why this list is what it is.
