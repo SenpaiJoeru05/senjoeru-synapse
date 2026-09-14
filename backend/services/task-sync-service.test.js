@@ -121,6 +121,85 @@ test('lenient parser imports a board with an invalid JSON escape', () => {
   assert.ok(repo.getById('a'), 'task imported despite bad escape');
 });
 
+/*
+ * The bug this section pins: a task board with two tasks sharing one id
+ * silently lost the FIRST one. `id` is the SQLite primary key, the sync loop
+ * upserted in file order with no duplicate check, and the second task's
+ * upsert quietly overwrote the first task's row — no error, no log, and the
+ * dashboard simply never showed the task that had been asked for. The board
+ * file itself still had both; only the database's copy of one of them
+ * vanished. Live case: a real-time-status task Joel asked Assistant Mode to
+ * create disappeared the moment an unrelated OpenCode-fallback turn computed
+ * the same "next id" for a different task.
+ */
+test('a duplicate id keeps the FIRST task and refuses the second, not the reverse', () => {
+  const { boardPath, svc, repo } = setup();
+  writeBoard(boardPath, [
+    { id: '30', title: 'Real-time agent status visibility', status: 'New' },
+    { id: '30', title: 'fsweb Core Web Vitals investigation', status: 'Working' },
+  ]);
+  const summary = svc.sync();
+
+  // The first one applied normally.
+  assert.equal(summary.created, 1);
+  const row = repo.getById('30');
+  assert.equal(row.title, 'Real-time agent status visibility');
+  assert.equal(row.status, 'New');
+
+  // The second was refused, not silently merged under a new id — the sync
+  // service reflects the board, it does not correct it.
+  assert.equal(summary.duplicateIds.length, 1);
+  assert.equal(summary.duplicateIds[0].id, '30');
+  assert.equal(summary.duplicateIds[0].title, 'fsweb Core Web Vitals investigation');
+  assert.equal(repo.getAll().length, 1, 'the duplicate must not create a second row');
+});
+
+test('three tasks sharing one id: only the first is kept, both others are refused', () => {
+  const { boardPath, svc, repo } = setup();
+  writeBoard(boardPath, [
+    { id: 'x', title: 'First', status: 'New' },
+    { id: 'x', title: 'Second', status: 'Working' },
+    { id: 'x', title: 'Third', status: 'Completed' },
+  ]);
+  const summary = svc.sync();
+  assert.equal(summary.created, 1);
+  assert.equal(summary.duplicateIds.length, 2);
+  assert.equal(repo.getById('x').title, 'First');
+});
+
+test('a duplicate id does not stop the REST of a normal sync', () => {
+  const { boardPath, svc, repo } = setup();
+  writeBoard(boardPath, [
+    { id: 'a', title: 'Task A', status: 'Working' },
+    { id: 'b', title: 'First B', status: 'New' },
+    { id: 'b', title: 'Second B', status: 'Working' }, // duplicate of 'b'
+    { id: 'c', title: 'Task C', status: 'Pending' },
+  ]);
+  const summary = svc.sync();
+  assert.equal(summary.created, 3); // a, b, c — not the duplicate
+  assert.equal(summary.duplicateIds.length, 1);
+  assert.equal(repo.getAll().length, 3);
+  assert.equal(repo.getById('a').title, 'Task A');
+  assert.equal(repo.getById('b').title, 'First B');
+  assert.equal(repo.getById('c').title, 'Task C');
+});
+
+test('re-syncing a board that still has the same duplicate reports it every time', () => {
+  // Deliberately not "fixed on the next run" — a lingering defect in the
+  // SOURCE file should keep being visible, not go quiet after the first sync,
+  // or a duplicate created between two collector polls could still slip by
+  // unnoticed on the second one.
+  const { boardPath, svc } = setup();
+  writeBoard(boardPath, [
+    { id: '1', title: 'One', status: 'New' },
+    { id: '1', title: 'One again', status: 'Working' },
+  ]);
+  const first = svc.sync();
+  const second = svc.sync();
+  assert.equal(first.duplicateIds.length, 1);
+  assert.equal(second.duplicateIds.length, 1);
+});
+
 test('missing board is skipped, SQLite untouched', () => {
   const { svc } = setup(); // boardPath never written
   const summary = svc.sync();

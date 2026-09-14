@@ -239,7 +239,8 @@ function syncTasksSafe(trigger) {
   if (!taskSync) return;
   try {
     const summary = taskSync.sync();
-    if (summary && !summary.skipped && (summary.created || summary.updated)) {
+    if (summary && !summary.skipped
+      && (summary.created || summary.updated || summary.duplicateIds?.length)) {
       console.log(`[db] task sync (${trigger}):`, JSON.stringify(summary));
     }
   } catch (err) {

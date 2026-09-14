@@ -46,10 +46,50 @@ class TaskSyncService {
   }
 
   _applyTasks(tasks, source, now) {
-    const summary = { created: 0, updated: 0, unchanged: 0, historyWritten: 0, total: tasks.length };
+    const summary = {
+      created: 0, updated: 0, unchanged: 0, historyWritten: 0, total: tasks.length,
+      // Ids that appeared more than once in THIS board read. See the guard
+      // below for why this can never again mean "one of them vanished".
+      duplicateIds: [],
+    };
     const seen = new Set();
 
     for (const t of tasks) {
+      /*
+       * A repeated id is a defect in the SOURCE file, not something to apply.
+       *
+       * `id` is the SQLite primary key (see the schema), so upserting a second
+       * task under an id already used by an earlier one in this SAME array
+       * does not create a second row — it silently overwrites the first one's
+       * row with the second one's content. That is not a theoretical risk:
+       * Assistant Mode created a task, a later turn's OpenCode fallback
+       * created an UNRELATED task that happened to compute the same "next id"
+       * with no way to know the first one already existed, and the correctly
+       * requested task disappeared from every dashboard view with no error
+       * anywhere. The file still had both; the database silently kept one.
+       *
+       * So: the FIRST occurrence of an id wins and gets applied as normal.
+       * Every later occurrence of the SAME id is refused — not upserted under
+       * a different id, not silently merged, just skipped — and reported back
+       * so the defect in tasks.json itself gets noticed and fixed at the
+       * source, which is the only place that is actually wrong. Silently
+       * reassigning it a fresh id would just be a second guess to sit next to
+       * the CLI's or the model's, and this service's whole job is to reflect
+       * the board, not to author it — see the header note on the one-way
+       * data flow this deliberately does not cross.
+       */
+      if (seen.has(t.id)) {
+        summary.duplicateIds.push({ id: t.id, title: t.title });
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[task-sync] duplicate id "${t.id}" in tasks.json — keeping the `
+          + `first "${t.id}" task found and refusing to overwrite it with `
+          + `"${t.title}". Fix the id in tasks.json; both entries currently `
+          + 'have a real title and neither is being silently discarded from '
+          + 'the board file itself, only from this sync.',
+        );
+        continue;
+      }
       seen.add(t.id);
       const hash = contentHash(t);
       const existing = this.repo.getById(t.id);
