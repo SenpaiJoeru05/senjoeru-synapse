@@ -329,9 +329,19 @@ const PR_TOOLS = [
  */
 const TEAM_TOOLS = ['Task', 'TodoWrite', 'WebSearch', 'WebFetch'];
 
+/**
+ * Filing a task, as one narrow command rather than a hand-edited JSON file.
+ *
+ * Scoped to this exact script, not `Bash(node:*)` — that would be arbitrary
+ * code execution for the sake of one operation. The script itself can only
+ * append a task; it cannot edit or delete one.
+ */
+const BOARD_TOOLS = ['Bash(node scripts/file-task.js:*)'];
+
 /** Everything the CLI may use here — and everything a subagent inherits. */
 const GRANTED_TOOLS = [
   ...ALLOWED_TOOLS, ...GIT_TOOLS, ...VERIFY_TOOLS, ...TEAM_TOOLS, ...PR_TOOLS,
+  ...BOARD_TOOLS,
 ];
 
 /**
@@ -374,6 +384,12 @@ const CAPABILITY_NOTE = [
   'spawn inherits exactly this tool list, so they can verify too.',
   'Research: WebSearch and WebFetch are available for anything your training',
   'would be stale on.',
+  'The task board: to file a NEW task run',
+  '`node scripts/file-task.js --title "..." --agent <slug> --repos <a,b>`.',
+  'Do not hand-edit tasks.json to add one and do not work out the next id',
+  'yourself — the script assigns it, which is the whole reason it exists.',
+  'Report the id it prints, not one you expected. Status changes on an',
+  'existing task are still a normal edit.',
   'One rule about all of it: never report work you did not do. Do not say you',
   'routed, assigned or handed something off unless you actually called Task,',
   'and never report a specialist as finished unless one really ran and',

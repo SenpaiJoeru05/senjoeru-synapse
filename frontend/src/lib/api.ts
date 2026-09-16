@@ -51,6 +51,25 @@ export const api = {
     return response.data
   },
 
+  /**
+   * File a new task. The board assigns the id — deliberately not a parameter,
+   * because callers guessing the next id is what put two different tasks on
+   * id 30. See shared/tasks-write.js.
+   */
+  async createTask(fields: {
+    title: string
+    assignedAgent?: string
+    repos?: string[]
+    status?: string
+    priority?: string
+    notes?: string
+    eta?: string
+    progress?: number
+  }): Promise<any> {
+    const response = await axios.post(`${API_BASE_URL}/tasks`, fields)
+    return response.data
+  },
+
   async getSettings(): Promise<any> {
     const response = await axios.get(`${API_BASE_URL}/settings`)
     return response.data
