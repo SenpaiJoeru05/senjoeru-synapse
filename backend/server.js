@@ -50,6 +50,8 @@ const { InsightsService } = require('./services/insights-service');
 const { createInsightsRouter } = require('./routes/insights');
 const { AttentionService } = require('./services/attention-service');
 const { createAttentionRouter } = require('./routes/attention');
+const { createAgentActivityRouter } = require('./routes/agent-activity');
+const { AgentActivityService, configResolveRepo } = require('./services/agent-activity-service');
 const { JoeruService } = require('./services/joeru-service');
 const { MemoryService } = require('./services/memory-service');
 const { createJoeruRouter } = require('./routes/joeru');
@@ -122,6 +124,7 @@ let docIndexService = null;
 let searchService = null;
 let insightsService = null;
 let attentionService = null;
+let agentActivityService = null;
 let dbRef = null;
 try {
   const db = openDatabase();
@@ -178,6 +181,14 @@ try {
 
   // Proactive attention queue (zero-token; tasks + budgets + costs).
   attentionService = new AttentionService(taskRepo, settingsService, METRICS_DIR);
+
+  // Live status of dispatched subagents — see docs/plans/
+  // AGENT-ACTIVITY-VISIBILITY.md. Not gated behind any existing repo the way
+  // the services above are; this has no dependency on taskRepo/analyticsRepo
+  // at all, it only needs the workspace config to name a cwd's repo.
+  agentActivityService = new AgentActivityService({
+    resolveRepo: configResolveRepo(getWorkspaceConfig),
+  });
 
   // Seed once: a default workspace + settings imported from config.json.
   const ws = workspaceService.ensureDefault();
@@ -278,6 +289,11 @@ if (docIndexService) app.use('/api/docs', createDocsRouter(docIndexRepo, docInde
 if (searchService) app.use('/api/search', createSearchRouter(searchService));
 if (insightsService) app.use('/api/insights', createInsightsRouter(insightsService));
 if (attentionService) app.use('/api/attention', createAttentionRouter(attentionService));
+// Mounted at /api directly - the router's own paths are /agent-events and
+// /agent-activity, not nested under a further /agent-activity prefix.
+if (agentActivityService) {
+  app.use('/api', createAgentActivityRouter(agentActivityService, () => scheduleActivityBroadcast()));
+}
 
 // C1 — Data safety: export a consistent copy of the SQLite database.
 app.get('/api/backup/export', (req, res) => {
@@ -688,6 +704,42 @@ function broadcast(str) {
   }
 }
 
+/**
+ * A fourth WS frame, deliberately NOT on the other three's debounced cycle.
+ *
+ * metrics:update/agent-network:update/db:update ride scheduleBroadcast's
+ * 300ms debounce because they are tied to the collector's own poll — this is
+ * a genuinely independent, faster-moving event source (a hook fires the
+ * instant a subagent's tool call resolves), so it gets its own short
+ * debounce instead of waiting on an unrelated cycle. 120ms coalesces a burst
+ * of PreToolUse+PostToolUse pairs without reading as laggy.
+ */
+let activityTimer = null;
+function scheduleActivityBroadcast() {
+  if (!agentActivityService || activityTimer) return; // already scheduled, let it fire
+  activityTimer = setTimeout(() => {
+    activityTimer = null;
+    broadcast(JSON.stringify({
+      type: 'agent-activity:update',
+      timestamp: new Date().toISOString(),
+      agents: agentActivityService.snapshot(),
+    }));
+  }, 120);
+}
+
+if (agentActivityService) {
+  // Unref'd, matching the CPU sampler convention: this timer must never be
+  // the reason the process stays alive.
+  //
+  // The broadcast is the point, not the sweep. Dropping an entry from the map
+  // is invisible to a client that is only ever told about hook arrivals, so
+  // without this a finished card stayed on screen until some unrelated
+  // dispatch happened to push a new frame.
+  setInterval(() => {
+    if (agentActivityService.sweep() > 0) scheduleActivityBroadcast();
+  }, 15_000).unref();
+}
+
 let refreshTimer = null;
 function scheduleBroadcast() {
   if (refreshTimer) clearTimeout(refreshTimer);
@@ -829,6 +881,15 @@ wss.on('connection', async (ws) => {
     ws.send(JSON.stringify(await buildPayload()));
     ws.send(JSON.stringify(await buildMetricsPayload()));
     if (taskRepo || analyticsRepo) ws.send(JSON.stringify(buildDbPayload()));
+    // So a page opened mid-dispatch paints immediately rather than waiting
+    // for the next hook event to happen to fire.
+    if (agentActivityService) {
+      ws.send(JSON.stringify({
+        type: 'agent-activity:update',
+        timestamp: new Date().toISOString(),
+        agents: agentActivityService.snapshot(),
+      }));
+    }
   } catch (_) { /* ignore send failures on a just-closed socket */ }
   ws.on('error', () => { /* swallow — reconnect handled client-side */ });
 });

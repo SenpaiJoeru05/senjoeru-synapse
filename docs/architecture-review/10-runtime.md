@@ -41,6 +41,7 @@ npm run dev
 |---|---|---|
 | REST API | backend | Serves metrics/settings/health/graph over HTTP |
 | WebSocket broadcaster | backend | Debounced, change-only push of metrics + graph frames |
+| Agent-activity service | backend | In-memory live dispatch state, fed by Claude Code hooks |
 | Collector poll loop | collector | Periodic + event-driven metric regeneration |
 | File watchers | collector | Trigger immediate re-poll on `.claude`/config changes |
 | Child-process supervisor | electron | Restart crashed backend/collector |
@@ -87,6 +88,7 @@ This makes the dashboard react within a few hundred ms of a real change, indepen
 
 - **Collector interval:** `startPolling()` reads `config.json.pollInterval` (seconds, min 5) → `intervalMs`, default **15s** if unset/invalid. `setInterval(poll, intervalMs)`. The live `config.json` sets `pollInterval: 5`.
 - **Backend `node-cron`:** imported in `server.js` but **no `cron.schedule` call exists** — it is currently unused.
+- **Agent-activity sweep:** a `.unref()`'d `setInterval(…, 15s)` drops finished dispatches 60s after they end. `unref`'d so it can never be the reason the process stays alive.
 - **Legacy git-collector:** if it were run, it uses its own `setInterval(..., 10000)` — but it is not wired in.
 
 ---
@@ -95,10 +97,11 @@ This makes the dashboard react within a few hundred ms of a real change, indepen
 
 Server side ([backend/server.js](../../backend/server.js)):
 - `WebSocketServer({ server, path: '/ws' })` shares the HTTP port.
-- **On connection:** sends current graph frame + metrics frame immediately.
+- **On connection:** sends current graph frame + metrics frame + agent-activity frame immediately.
 - **On `/api/internal/graph-refresh`:** `scheduleBroadcast()` — clears/sets a **300ms** debounce timer, then:
   1. `buildPayload()` (graph + activity), compare against `lastPayloadStr` on stable fields → broadcast if changed.
   2. `buildMetricsPayload()` (metrics + health), compare `metrics` against `lastMetricsStr` → broadcast if changed.
+- **On `/api/agent-events`:** `scheduleActivityBroadcast()` — its own **120ms** debounce on its own timer, independent of the collector-tied 300ms cycle above. Hook events arrive in bursts as a subagent works, and at 300ms a rapid sequence of tool calls collapses into a single visible step.
 - `broadcast(str)` sends to every open client.
 
 Client side: two hooks each maintain a resilient socket with exponential-backoff reconnect and REST-first paint (see [08-dashboard.md](08-dashboard.md)).
@@ -140,3 +143,5 @@ Timing characteristics:
 - `tasks.json` with invalid escapes → repaired in memory (live file untouched); if unrecoverable → memory-derived fallback.
 - Child process crash → supervisor restarts after 3s.
 - WebSocket drop → client reconnects with backoff; last-known data stays on screen.
+- Synapse down when a hook fires → the forwarder's POST fails, the hook still exits 0, and the dispatch is unaffected. This is the one failure mode that would make the feature harmful rather than merely unfinished, so it was measured rather than assumed: baseline vs. dead-port showed no consistent latency difference.
+- Synapse restarted mid-dispatch → the missed `SubagentStart` is adopted from the next event for that `agent_id` rather than dropping it; the entry simply has no earlier history.
