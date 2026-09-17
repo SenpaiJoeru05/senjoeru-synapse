@@ -356,6 +356,22 @@ ipcMain.handle('claude-ask', async (event, payload) => {
   const fresh = !assistantSession.started();
   const sessionId = assistantSession.current();
 
+  /*
+   * Record it as Assistant Mode's BEFORE the turn runs, not after.
+   *
+   * This call was missing entirely: assistant-sessions.js exists precisely so
+   * Chat can exclude these, claude-sessions.list() is already wired to take
+   * that exclusion list, and nothing ever added an id to it. The only entries
+   * were 52 rows from the one-off backfill on 11 Sep, so every voice
+   * conversation since then has leaked into Chat's sidebar — the exact bug
+   * that module was written to prevent, reappearing because the recording end
+   * of it was never connected.
+   *
+   * Before the turn because the transcript exists the moment the CLI starts,
+   * so a Chat list refreshed mid-answer would otherwise see an unrecorded id.
+   */
+  if (fresh) assistantSessions.remember(sessionId);
+
   const answer = await claude.ask(prompt, send, sessionId, rawQuestion);
   if (fresh) nameAssistantSession(sessionId);
   return answer;
