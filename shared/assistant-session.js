@@ -101,6 +101,33 @@ function createTracker({ uuid } = {}) {
       return { id, previous };
     },
 
+    /**
+     * Continue an EXISTING conversation — the one the user picked from the
+     * session list.
+     *
+     * Without this the picker could only ever be cosmetic. The renderer holds
+     * no session of its own for the CLI path: claude-ask reads current() from
+     * here, so restoring old messages on screen while this still pointed at
+     * the live session meant the next question went to the wrong
+     * conversation, with the transcript on screen belonging to another. That
+     * is worse than not offering the feature — it looks like it resumed.
+     *
+     * The id is whatever the picker listed, and resumeFlags() decides
+     * --resume versus --session-id from what is actually on disk, so adopting
+     * a session that has since been deleted degrades to starting a new one
+     * under that id rather than failing the turn.
+     */
+    adopt(sessionId) {
+      const clean = String(sessionId || '').trim();
+      if (!clean) throw new Error('a session id is required');
+      const previous = id;
+      id = clean;
+      // Only record a genuine change, so re-picking the current conversation
+      // does not stack duplicates in the history this exposes.
+      if (previous !== clean) history.push(clean);
+      return { id, previous };
+    },
+
     /** True once a question has actually been asked in this run. */
     started() {
       return id !== null;

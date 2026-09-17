@@ -48,6 +48,55 @@ interface Turn {
   pending?: boolean
 }
 
+/**
+ * What the person actually said, out of a stored prompt.
+ *
+ * Every question is sent wrapped by ground() — rules, then a state block,
+ * then the real question on a final `Me: …` line. Replaying the transcript
+ * raw would show forty lines of instructions where the user's sentence should
+ * be, so the last `Me:` line is the message and everything above it is
+ * machinery. A prompt that was never grounded has no such line and is shown
+ * as-is.
+ */
+function spokenPart(text: string): string {
+  const marker = text.lastIndexOf('\nMe: ')
+  return marker === -1 ? text.trim() : text.slice(marker + 5).trim()
+}
+
+/**
+ * A stored transcript is a flat list of user/assistant messages; this window
+ * renders question-and-answer pairs. Pairing rather than flattening keeps one
+ * component for live and restored turns instead of a second render path that
+ * could drift.
+ *
+ * An assistant message with no question before it is dropped: it is the tail
+ * of an exchange whose prompt was tool bookkeeping, and inventing an empty
+ * question to hang it on would put words in the user's mouth.
+ */
+function pairTurns(
+  stored: { role: 'user' | 'assistant'; text: string }[],
+): Turn[] {
+  const paired: Turn[] = []
+  for (const m of stored) {
+    if (m.role === 'user') {
+      const question = spokenPart(m.text)
+      if (question) paired.push({ question, answer: null })
+      continue
+    }
+    const open = paired[paired.length - 1]
+    if (!open || open.answer) continue
+    open.answer = {
+      intent: 'unknown' as Answer['intent'],
+      speech: '',
+      lines: [m.text],
+      // Restored from a CLI transcript, so this is what answered — and the
+      // badge saying so is the one honest thing to show about a replay.
+      source: 'claude',
+    }
+  }
+  return paired
+}
+
 type Phase = 'idle' | 'listening' | 'thinking' | 'speaking'
 
 const EXAMPLES = [
@@ -313,6 +362,9 @@ export default function Assistant() {
   const [voiceReady, setVoiceReady] = useState(false)
   const [voices, setVoices] = useState<{ id: string; label: string; current: boolean }[]>([])
   const [voiceId, setVoiceId] = useState<string>('')
+  const [sessions, setSessions] = useState<any[]>([])
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null)
+  const [loadingSession, setLoadingSession] = useState(false)
 
   const scrollRef = useRef<HTMLDivElement>(null)
   const mutedRef = useRef(false)
@@ -469,6 +521,28 @@ export default function Assistant() {
    * The old conversation is kept, not deleted: it keeps its "Assistant Mode —
    * <time>" title and stays openable from Chat.
    */
+  /**
+   * Assistant Mode's past conversations.
+   *
+   * From the CLI's own transcripts, not OpenCode's session list. This window
+   * answers through the Claude CLI, so OpenCode holds none of these — asking
+   * it returned an empty array, the picker was hidden behind
+   * `sessions.length > 0`, and the feature looked broken rather than
+   * mis-wired.
+   *
+   * Declared above newConversation because that resets into a fresh session
+   * and has to refresh this afterwards; the other order puts it in the
+   * temporal dead zone when the dependency array is evaluated.
+   */
+  const loadSessions = useCallback(async () => {
+    try {
+      const rows = await window.electronAPI?.assistantSessions?.()
+      setSessions(rows ?? [])
+    } catch {
+      setSessions([])
+    }
+  }, [])
+
   const newConversation = useCallback(async () => {
     if (!window.electronAPI?.assistantNewConversation) return
     try {
@@ -481,7 +555,47 @@ export default function Assistant() {
     // conversation the CLI no longer has.
     recentRef.current = []
     setTurns([])
-  }, [])
+    setSelectedSessionId(null)
+    // The conversation just left is a past conversation now, and the list was
+    // read before it existed — without this it cannot be reopened until the
+    // window is.
+    loadSessions()
+  }, [loadSessions])
+
+  /**
+   * Open one: put its messages on screen AND point the CLI at it.
+   *
+   * Both halves matter. Restoring the messages without resuming the session
+   * would show one conversation while the next question continued a different
+   * one — the failure that looks most like success.
+   */
+  const openSession = useCallback(async (id: string) => {
+    if (loadingSession) return
+    setLoadingSession(true)
+    try {
+      const stored = await window.electronAPI?.claudeSessionRead?.(id)
+      if (stored?.error) throw new Error(stored.error)
+
+      await window.electronAPI?.assistantResumeSession?.(id)
+
+      setTurns(pairTurns(stored?.turns ?? []))
+      setSelectedSessionId(id)
+      // The CLI carries this conversation's own history now, so re-sending
+      // exchanges from the previous one would duplicate it into the prompt.
+      recentRef.current = []
+      setStatus('')
+    } catch (err: any) {
+      setStatus(`could not open that conversation: ${err?.message || 'unknown error'}`)
+    } finally {
+      setLoadingSession(false)
+    }
+  }, [loadingSession])
+
+  // The list on mount, and again whenever a conversation starts or ends, so a
+  // session created this run is selectable without reopening the window.
+  useEffect(() => {
+    loadSessions()
+  }, [loadSessions])
 
   /** Perform a confirmed change. Reports failure rather than throwing. */
   const applyTaskStatus = useCallback(async (id: string, status: TaskStatus) => {
@@ -1125,6 +1239,55 @@ export default function Assistant() {
             <Bot className="w-3.5 h-3.5 text-cyan-300" />
           </span>
           <span className="text-sm font-semibold tracking-tight">Assistant Mode</span>
+
+          {/*
+            Past conversations.
+
+            `no-drag` is load-bearing, not tidiness: this sits inside the
+            title bar, which is a drag region, and a control in a drag region
+            receives no clicks at all — the menu simply never opened. It was
+            the second reason this looked broken, under the first.
+          */}
+          {sessions.length > 0 && (
+            <select
+              value={selectedSessionId ?? ''}
+              onChange={(e) => { if (e.target.value) openSession(e.target.value) }}
+              disabled={busy || loadingSession}
+              title="Open a previous conversation"
+              style={{
+                WebkitAppRegion: 'no-drag',
+                backgroundColor: 'rgba(0, 0, 0, 0.3)',
+                color: '#e5e7eb',
+              } as React.CSSProperties}
+              className="rounded-lg text-[11px] px-2 py-1.5 ml-2 max-w-[200px]
+                         bg-black/30 border border-cyan-400/20 hover:border-cyan-400/40
+                         focus:outline-none focus:border-cyan-400/60 focus:ring-1 focus:ring-cyan-400/30
+                         disabled:opacity-40 disabled:hover:border-cyan-400/20
+                         transition-all cursor-pointer"
+            >
+              <option value="" style={{
+                backgroundColor: 'rgba(15, 23, 42, 0.95)',
+                color: '#e5e7eb',
+                padding: '0.5rem',
+              }}>
+                {loadingSession ? 'Opening…' : 'Select session'}
+              </option>
+              {sessions.map((s) => (
+                <option
+                  key={s.id}
+                  value={s.id}
+                  style={{
+                    backgroundColor: 'rgba(15, 23, 42, 0.95)',
+                    color: '#e5e7eb',
+                    padding: '0.5rem',
+                    borderBottom: '1px solid rgba(200, 200, 200, 0.1)',
+                  }}
+                >
+                  {s.title?.replace(/^Assistant Mode\s*[—-]\s*/, '') || 'Untitled'}
+                </option>
+              ))}
+            </select>
+          )}
         </div>
         <div className="flex items-center gap-1" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
           {voices.length > 1 && (

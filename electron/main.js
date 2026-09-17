@@ -356,6 +356,22 @@ ipcMain.handle('claude-ask', async (event, payload) => {
   const fresh = !assistantSession.started();
   const sessionId = assistantSession.current();
 
+  /*
+   * Record it as Assistant Mode's BEFORE the turn runs, not after.
+   *
+   * This call was missing entirely: assistant-sessions.js exists precisely so
+   * Chat can exclude these, claude-sessions.list() is already wired to take
+   * that exclusion list, and nothing ever added an id to it. The only entries
+   * were 52 rows from the one-off backfill on 11 Sep, so every voice
+   * conversation since then has leaked into Chat's sidebar — the exact bug
+   * that module was written to prevent, reappearing because the recording end
+   * of it was never connected.
+   *
+   * Before the turn because the transcript exists the moment the CLI starts,
+   * so a Chat list refreshed mid-answer would otherwise see an unrecorded id.
+   */
+  if (fresh) assistantSessions.remember(sessionId);
+
   const answer = await claude.ask(prompt, send, sessionId, rawQuestion);
   if (fresh) nameAssistantSession(sessionId);
   return answer;
@@ -542,6 +558,32 @@ ipcMain.handle('assistant-new-conversation', async () => {
 ipcMain.handle('assistant-session', async () => ({
   id: assistantSession.started() ? assistantSession.current() : null,
 }));
+
+/**
+ * Assistant Mode's OWN past conversations — exactly the rows Chat leaves out.
+ *
+ * The same reader Chat uses, with the filter inverted, rather than a second
+ * source. The first attempt at this listed OpenCode's sessions instead, which
+ * is a different runner entirely: Assistant Mode answers through the Claude
+ * CLI, so that list contained none of these conversations and the picker had
+ * nothing to show.
+ */
+ipcMain.handle('assistant-sessions', async () => (
+  claudeSessions.list(PROJECT_DIR, null, assistantSessions.ids())
+));
+
+/**
+ * Continue one of them. The renderer restores the messages on screen; this is
+ * what makes the NEXT question go to that conversation rather than the one it
+ * was already in.
+ */
+ipcMain.handle('assistant-resume-session', async (_e, id) => {
+  const { id: now, previous } = assistantSession.adopt(id);
+  // Already Assistant Mode's by definition — it came from the list above —
+  // but re-recording is free and keeps the file right if it was pruned.
+  assistantSessions.remember(now);
+  return { id: now, previous };
+});
 
 ipcMain.handle('claude-usage', async () => claudeUsage.read());
 

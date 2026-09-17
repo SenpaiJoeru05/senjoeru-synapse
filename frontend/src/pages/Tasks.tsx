@@ -6,6 +6,7 @@ import {
 } from 'lucide-react'
 import { useRealtime, useTasks } from '@/lib/realtime'
 import { repoPill, repoDot } from '@/lib/repo-color'
+import { sortTasks, STATUS_ORDER } from '@/lib/task-order'
 
 interface TaskRepo {
   name: string
@@ -88,17 +89,8 @@ const PRIORITY_COLORS = {
 // Repo colours are derived from the name — see lib/repo-color.
 const repoColor = repoPill
 
-const STATUS_ORDER = ['Working', 'Reviewing', 'Pending', 'Completed', 'Failed']
-
-function sortTasks(tasks: Task[]) {
-  return [...tasks].sort((a, b) => {
-    const ai = STATUS_ORDER.indexOf(a.status)
-    const bi = STATUS_ORDER.indexOf(b.status)
-    if (ai !== bi) return ai - bi
-    const pp = { High: 0, Medium: 1, Low: 2 }
-    return (pp[a.priority] ?? 1) - (pp[b.priority] ?? 1)
-  })
-}
+// Ordering lives in lib/task-order so this page and Overview cannot drift
+// apart on it again — they previously sorted the same board two ways.
 
 function TaskCard({ task, index }: { task: Task; index: number }) {
   const [expanded, setExpanded] = useState(false)
@@ -280,7 +272,7 @@ export default function Tasks() {
     })
   )
 
-  const statuses = ['Working', 'Reviewing', 'Pending', 'Completed', 'Failed']
+  const statuses = STATUS_ORDER
 
   return (
     <div className="p-8 w-full">

@@ -95,7 +95,19 @@ function titleFrom(file) {
         ? content.map((b) => (typeof b?.text === 'string' ? b.text : '')).join('')
         : '';
 
-    const clean = text.replace(/\s+/g, ' ').trim();
+    /*
+     * A spoken question is wrapped by ground() — instructions, a state block,
+     * then the real sentence on a final `Me: …` line. Titling from the raw
+     * text gives every one of them the identical opening of the preamble
+     * ("You are answering one turn of a spoken conversation…"), which is the
+     * clutter that made these worth hiding from Chat in the first place. Take
+     * what the person actually said instead; it is the only part of the
+     * prompt that distinguishes one conversation from another.
+     */
+    const marker = text.lastIndexOf('\nMe: ');
+    const spoken = marker === -1 ? text : text.slice(marker + 5);
+
+    const clean = spoken.replace(/\s+/g, ' ').trim();
     if (!clean || clean.startsWith('<')) continue;
     return clean.slice(0, 80);
   }
@@ -111,10 +123,14 @@ function titleFrom(file) {
 /**
  * @param {string} projectDir
  * @param {Set<string>} [exclude] session ids to leave out — Assistant Mode's
- *   one-shot transcripts, which are a per-question implementation detail and
- *   not conversations anyone would want to resume. See assistant-sessions.js.
+ *   transcripts, which Chat's list does not want. See assistant-sessions.js.
+ * @param {Set<string>} [only] the mirror image: keep ONLY these ids. Assistant
+ *   Mode's own session picker needs exactly the rows Chat discards, and one
+ *   list with two filters beats a second near-identical reader that could
+ *   drift from this one on titles, empty-file handling or sort order.
+ *   Passing both is not meaningful; `only` wins.
  */
-function list(projectDir, exclude = null) {
+function list(projectDir, exclude = null, only = null) {
   const dir = sessionDir(projectDir);
   if (!dir) return [];
 
@@ -134,7 +150,9 @@ function list(projectDir, exclude = null) {
      * forty rows — the exact cost the title handling below avoids, and this
      * directory already holds a 23MB transcript.
      */
-    if (exclude && exclude.has(id)) continue;
+    if (only) {
+      if (!only.has(id)) continue;
+    } else if (exclude && exclude.has(id)) continue;
 
     const full = path.join(dir, f);
     let stat;

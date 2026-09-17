@@ -53,6 +53,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   assistantNewConversation: () => ipcRenderer.invoke('assistant-new-conversation'),
   /** Which conversation Assistant Mode is in, or null before the first question. */
   assistantSession: () => ipcRenderer.invoke('assistant-session'),
+  /** Assistant Mode's past conversations — the rows Chat's list leaves out. */
+  assistantSessions: () => ipcRenderer.invoke('assistant-sessions'),
+  /** Continue one of them, so the next question goes to that conversation. */
+  assistantResumeSession: (id) => ipcRenderer.invoke('assistant-resume-session', id),
   /**
    * Tool activity for the answer in flight. Returns an unsubscribe function —
    * without one, every mount adds another listener and one Read is reported

@@ -140,3 +140,51 @@ test('tracker and resumeFlags compose: first turn starts, second resumes', () =>
     ['--session-id', next],
   );
 });
+
+/* ── adopt ────────────────────────────────────────────────────────────────── */
+
+test('adopt continues an existing conversation instead of minting one', () => {
+  const t = createTracker({ uuid: counter() });
+  const first = t.current();
+
+  const { id, previous } = t.adopt('9d0f1a2b-3c4d-5e6f-7a8b-9c0d1e2f3a4b');
+  assert.strictEqual(previous, first);
+  assert.strictEqual(id, '9d0f1a2b-3c4d-5e6f-7a8b-9c0d1e2f3a4b');
+  // The whole point: the NEXT turn must go to the adopted session, because
+  // claude-ask reads current() and nothing else.
+  assert.strictEqual(t.current(), '9d0f1a2b-3c4d-5e6f-7a8b-9c0d1e2f3a4b');
+  assert.ok(t.all().includes(first), 'the replaced session stays in history');
+});
+
+test('adopt before anything was asked still counts as started', () => {
+  const t = createTracker({ uuid: counter() });
+  assert.strictEqual(t.started(), false);
+  t.adopt('abcdef01-2345-6789-abcd-ef0123456789');
+  assert.strictEqual(t.started(), true, 'so the turn does not rename the session');
+  assert.strictEqual(t.current(), 'abcdef01-2345-6789-abcd-ef0123456789');
+});
+
+test('re-adopting the current session does not stack duplicates', () => {
+  const t = createTracker({ uuid: counter() });
+  t.adopt('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+  const before = t.all().length;
+  t.adopt('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+  assert.strictEqual(t.all().length, before);
+});
+
+test('adopt refuses an empty id rather than silently minting one', () => {
+  const t = createTracker({ uuid: counter() });
+  assert.throws(() => t.adopt(''), /session id is required/);
+  assert.throws(() => t.adopt(null), /session id is required/);
+  assert.throws(() => t.adopt('   '), /session id is required/);
+});
+
+test('an adopted session resumes rather than being started again', () => {
+  const t = createTracker({ uuid: counter() });
+  const disk = new Set(['11111111-2222-3333-4444-555555555555']);
+  t.adopt('11111111-2222-3333-4444-555555555555');
+  assert.deepStrictEqual(
+    resumeFlags(t.current(), { started: new Set(), exists: (x) => disk.has(x) }),
+    ['--resume', '11111111-2222-3333-4444-555555555555'],
+  );
+});

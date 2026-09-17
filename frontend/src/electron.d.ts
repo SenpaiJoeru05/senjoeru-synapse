@@ -111,6 +111,12 @@ export interface ElectronAPI {
   assistantNewConversation?: () => Promise<{ id: string; previous: string | null }>
   /** Which conversation Assistant Mode is in, or null before the first question. */
   assistantSession?: () => Promise<{ id: string | null }>
+  /** Assistant Mode's own past conversations — the rows Chat's list omits. */
+  assistantSessions?: () => Promise<{
+    id: string; title: string; updated: number; bytes: number
+  }[]>
+  /** Continue one, so the next question goes to that conversation. */
+  assistantResumeSession?: (id: string) => Promise<{ id: string; previous: string | null }>
   /**
    * Tool activity for the answer in flight. Returns an unsubscribe function.
    *

@@ -440,6 +440,40 @@ app.get('/api/metrics', async (req, res) => {
 });
 
 /**
+ * File a new task on the authoritative board.
+ *
+ * The id is deliberately NOT accepted from the caller — shared/tasks-write.js
+ * assigns it. That is the entire reason this endpoint exists rather than
+ * leaving creation to an agent editing the JSON by hand, so passing one is a
+ * 400 rather than a silent override.
+ */
+app.post('/api/tasks', async (req, res) => {
+  try {
+    const file = getWorkspaceConfig()?.paths?.tasksFile;
+    if (!file || !fs.existsSync(file)) {
+      return res.status(404).json({ error: `task board not found at ${file || '(unset)'}` });
+    }
+
+    const { createTask } = require('../shared/tasks-write');
+    const { task } = createTask(file, req.body || {});
+
+    // Reconcile and push straight away rather than leaving the new task
+    // invisible until the next collector ping. Filing a task and not seeing
+    // it appear is indistinguishable from the filing having failed, which is
+    // the confusion this endpoint exists to end. Both calls are internally
+    // guarded, so neither can turn a successful write into an error response.
+    syncTasksSafe('task-create');
+    scheduleBroadcast();
+
+    return res.status(201).json({ success: true, task });
+  } catch (error) {
+    const clientError = /^(title is required|unknown status|unknown priority|id is assigned|task board has no)/
+      .test(error.message);
+    return res.status(clientError ? 400 : 500).json({ error: error.message });
+  }
+});
+
+/**
  * Change one task's status on the authoritative board.
  *
  * Not `POST /api/metrics/tasks`, which looks like the write path and is not:
@@ -447,9 +481,10 @@ app.get('/api/metrics', async (req, res) => {
  * `paths.tasksFile` on every poll, so a write there survives until the next
  * tick and then vanishes. This writes the real board.
  *
- * Narrow on purpose — status only, on a task that already exists. Creating,
- * deleting and editing text stay with the agents; see shared/tasks-write.js
- * for why the ownership rule changed this far and no further.
+ * Status only, on a task that already exists — creation is POST /api/tasks
+ * above. Deleting and editing text still stay with the agents; see
+ * shared/tasks-write.js for why the ownership rule moved this far and no
+ * further.
  */
 app.post('/api/tasks/:id/status', async (req, res) => {
   try {
