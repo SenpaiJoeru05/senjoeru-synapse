@@ -1,5 +1,5 @@
 const {
-  app, BrowserWindow, ipcMain, globalShortcut, screen,
+  app, BrowserWindow, ipcMain, globalShortcut, screen, shell,
 } = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
@@ -624,6 +624,34 @@ ipcMain.handle('open-assistant', async () => {
 // to ask for one.
 ipcMain.handle('close-assistant', async () => {
   if (assistantWindow && !assistantWindow.isDestroyed()) assistantWindow.close();
+  return true;
+});
+
+/**
+ * The Environment rail's "Quick links" — the only way out of Assistant Mode's
+ * own window into a tracked repo's folder or the main dashboard.
+ *
+ * Both cross into the main process because there is no other way to reach
+ * either destination from here: the renderer has no filesystem access
+ * (contextIsolation), and the main dashboard is a SEPARATE BrowserWindow this
+ * one shares no Router with — see openAssistantWindow()'s note on why a route
+ * cannot be deep-linked into it.
+ */
+ipcMain.handle('open-repo', async (_e, repoPath) => {
+  if (typeof repoPath !== 'string' || !repoPath) return { opened: false, error: 'no path given' };
+  const err = await shell.openPath(repoPath);
+  return { opened: !err, error: err || null };
+});
+
+ipcMain.handle('focus-main-window', async () => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.show();
+    mainWindow.focus();
+    return true;
+  }
+  // The main window can be fully closed (not just hidden) while the
+  // assistant window stays open — recreate it rather than failing quietly.
+  createWindow();
   return true;
 });
 

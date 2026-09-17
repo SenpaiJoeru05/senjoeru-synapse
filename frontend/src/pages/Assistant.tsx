@@ -23,7 +23,7 @@ import { api } from '../lib/api'
 import VoiceOrb from '../components/VoiceOrb'
 import Markdown from '../components/Markdown'
 import AssistantStats, {
-  EnvironmentRail, WorkspaceStatusRail, SPLIT_MIN_WIDTH, useWideEnough,
+  EnvironmentRail, WorkspaceStatusRail, SPLIT_MIN_WIDTH, useWideEnough, SuccessBadge,
 } from '../components/AssistantStats'
 import { useAgentActivity } from '../lib/useAgentActivity'
 import { toolIcon } from '../lib/tool-icons'
@@ -108,6 +108,7 @@ const EXAMPLES = [
   "what's broken",
   'how much have I spent',
 ]
+
 
 /**
  * Assistant Mode is always Joeru — no agent picker, unlike the Chat tab.
@@ -355,6 +356,7 @@ export default function Assistant() {
       return next
     })
   }, [])
+
   const [input, setInput] = useState('')
   const [phase, setPhase] = useState<Phase>('idle')
   const [muted, setMuted] = useState(false)
@@ -1382,6 +1384,17 @@ export default function Assistant() {
         and stays put when the log is opened or closed underneath it.
       */}
       <div className="flex-1 min-h-0 flex flex-col items-center justify-center px-4">
+        {/*
+          How much of finished work actually lands — Completed against Failed,
+          above the sphere. Fixed height even though the badge itself renders
+          nothing until a task has finished (see SuccessBadge/useTaskSuccess),
+          so the first Completed or Failed task of the run does not nudge the
+          sphere — same reasoning as the caption box and live-action row below.
+        */}
+        <div className="h-6 mb-1 flex items-center justify-center">
+          <SuccessBadge />
+        </div>
+
         <button
           onClick={onOrbClick}
           disabled={phase === 'thinking' || !voiceAvailable()}

@@ -60,13 +60,13 @@ const PRIORITIES = ['Low', 'Medium', 'High'];
 /**
  * Progress implied by a status, applied only where it is unambiguous.
  *
- * Completed means 100 by definition and the dashboard renders a completed task
- * at whatever progress it finds, so leaving it at 40 shows a finished task as
- * two-fifths done. The other statuses say nothing about progress, so they leave
+ * Completed means 100 by definition. Reviewing means work is done and ready
+ * for review, so it gets 95 unless already higher. The other statuses leave
  * whatever the agent recorded alone rather than inventing a number.
  */
 function impliedProgress(status, current) {
   if (status === 'Completed') return 100;
+  if (status === 'Reviewing' && (!Number.isFinite(current) || current < 95)) return 95;
   return typeof current === 'number' ? current : 0;
 }
 
@@ -169,7 +169,7 @@ function createTask(filePath, fields = {}) {
 }
 
 /**
- * Read, change one status, write back atomically.
+ * Read, change one status and optionally progress, write back atomically.
  *
  * Atomic because this is now the SECOND writer of this file — the agents are
  * the first, and the collector watches it. A partial write would be read by a
@@ -183,7 +183,7 @@ function createTask(filePath, fields = {}) {
  * protocol every agent would have to honour, which is a much larger change
  * than this feature justifies.
  */
-function setTaskStatus(filePath, taskId, status) {
+function setTaskStatus(filePath, taskId, status, progress = null) {
   if (!STATUSES.includes(status)) {
     throw new Error(`unknown status "${status}" — expected one of ${STATUSES.join(', ')}`);
   }
@@ -196,7 +196,12 @@ function setTaskStatus(filePath, taskId, status) {
   const now = new Date().toISOString();
 
   task.status = status;
-  task.progress = impliedProgress(status, task.progress);
+  // Progress: explicit value wins, then implied by status, then current
+  if (progress !== null && Number.isFinite(progress)) {
+    task.progress = Math.max(0, Math.min(100, Number(progress)));
+  } else {
+    task.progress = impliedProgress(status, task.progress);
+  }
   // "Done" reads oddly on anything unfinished, so it is set only alongside
   // Completed and cleared back to empty rather than left stale.
   if (status === 'Completed') task.eta = 'Done';

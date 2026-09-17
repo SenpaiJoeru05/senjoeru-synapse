@@ -18,8 +18,10 @@
  */
 import { useEffect, useState } from 'react'
 import {
-  AlertTriangle, Coins, GitBranch, Loader2, Play, Clock as ClockIcon, Sun, Moon,
+  AlertTriangle, Coins, GitBranch, GitCommit, Loader2, Play, Clock as ClockIcon,
+  Sun, Moon, FolderOpen, LayoutDashboard, CheckCircle2, XCircle, Award,
 } from 'lucide-react'
+import { PieChart, Pie, Cell, ResponsiveContainer } from 'recharts'
 import { api } from '@/lib/api'
 import { count, usePresentationMode } from '@/lib/presentation'
 import { formatBytes } from '@/lib/utils'
@@ -63,17 +65,38 @@ export function useWideEnough(min = RAIL_MIN_WIDTH): boolean {
   return wide
 }
 
+/** One tracked repo's branch position, for the "Branches" tile. */
+interface RepoStatus {
+  name: string
+  branch: string
+  ahead: number
+  behind: number
+  /** Modified + created + deleted, combined — "how much is unsaved", not which. */
+  modified: number
+}
+
 interface Snapshot {
   attention: number
   topAttention: string | null
   working: number
   waiting: number
   done: number
+  /** Tasks marked Failed — the other half of `done` in the success rate. */
+  failed: number
+  /**
+   * Completed / (Completed + Failed), 0-100. Null when neither has ever
+   * happened yet — there is nothing to divide, and 100% from zero data would
+   * be a lie of omission rather than a measurement.
+   */
+  successRate: number | null
   tokens: number
   repos: number
   dirty: number
   /** Last seven days of token volume, for the sparkline. */
   trend: number[]
+  repoStatus: RepoStatus[]
+  /** Token breakdown by project — for the pie chart widget. */
+  projectBreakdown: Array<{ name: string; tokens: number }>
 }
 
 /**
@@ -109,16 +132,33 @@ function useWorkspaceSnapshot(): { snap: Snapshot | null; failed: boolean } {
       const items: any[] = attentionM?.items ?? []
       const repos: any[] = gitM?.repos ?? []
 
+      const done = tasks.filter((t) => t.status === 'Completed').length
+      const failed = tasks.filter((t) => t.status === 'Failed').length
+      const finished = done + failed
+
       setSnap({
         attention: items.length,
         topAttention: items[0]?.title ?? null,
         working: tasks.filter((t) => t.status === 'Working').length,
         waiting: tasks.filter((t) => t.status === 'Pending' || t.status === 'Reviewing').length,
-        done: tasks.filter((t) => t.status === 'Completed').length,
+        done,
+        failed,
+        successRate: finished > 0 ? Math.round((done / finished) * 100) : null,
         tokens: Number(tokensM?.today ?? 0),
         repos: repos.length,
         dirty: repos.reduce((n, r) => n + (r.modified?.length ?? 0), 0),
         trend: (tokensM?.daily ?? []).slice(-7).map((d: any) => Number(d.tokens ?? 0)),
+        repoStatus: repos.map((r: any) => ({
+          name: r.name,
+          branch: r.branch || r.current || '?',
+          ahead: Number(r.ahead ?? 0),
+          behind: Number(r.behind ?? 0),
+          modified: (r.modified?.length ?? 0) + (r.created?.length ?? 0) + (r.deleted?.length ?? 0),
+        })),
+        projectBreakdown: (tokensM?.byProject ?? []).map((p: any) => ({
+          name: p.name || 'unnamed',
+          tokens: Number(p.tokens ?? 0),
+        })),
       })
     }
 
@@ -152,6 +192,161 @@ function useSystemHealth(): any | null {
   }, [])
 
   return health
+}
+
+/** Health checks are cheap and change slowly; matches useAttention's cadence. */
+const JOERU_HEALTH_MS = 20_000
+
+/**
+ * Whether the OpenCode server Joeru talks through is actually reachable.
+ *
+ * Distinct from `useSystemHealth` above: that is the host machine (CPU, RAM),
+ * this is the one backend service Assistant Mode's slow path depends on.
+ * `running: false` on a fresh app start is normal — see joeru-service.js's
+ * own `health()`, which this simply polls.
+ */
+function useJoeruHealth(): { running: boolean; reason?: string } | null {
+  const [health, setHealth] = useState<{ running: boolean; reason?: string } | null>(null)
+
+  useEffect(() => {
+    let alive = true
+    const load = () => api.joeruHealth()
+      .then((h) => { if (alive) setHealth(h) })
+      .catch(() => { if (alive) setHealth({ running: false, reason: 'unreachable' }) })
+    load()
+    const t = setInterval(load, JOERU_HEALTH_MS)
+    return () => { alive = false; clearInterval(t) }
+  }, [])
+
+  return health
+}
+
+/** A commit, flattened out of its repo for a cross-repo "recent activity" feed. */
+interface CommitEntry {
+  repo: string
+  hash: string
+  message: string
+  date: string
+}
+
+/** Trimmed shape of an /api/attention item — see attention-service.js. */
+interface AttentionItemLite {
+  id: string
+  severity: 'high' | 'medium' | 'low'
+  title: string
+  detail: string
+}
+
+/** A repo's folder, for the "Quick links" open-in-Explorer buttons. */
+interface RepoLink {
+  name: string
+  path: string
+}
+
+interface EnvExtras {
+  commits: CommitEntry[]
+  attentionItems: AttentionItemLite[]
+  repoLinks: RepoLink[]
+}
+
+/**
+ * What the Environment rail needs beyond the clock and host health: recent
+ * commits across every tracked repo, the top of the attention queue, and each
+ * repo's folder for "Quick links".
+ *
+ * A second poll of `git` and `attention` alongside `useWorkspaceSnapshot`'s
+ * own — not merged into it, because that hook only runs on the OTHER side of
+ * the window (`WorkspaceStatusRail`) and this one has to work when only the
+ * Environment rail is mounted. Same POLL_MS cadence, so both sides of the
+ * split move together.
+ */
+function useEnvironmentExtras(): { data: EnvExtras | null; failed: boolean } {
+  const [data, setData] = useState<EnvExtras | null>(null)
+  const [failed, setFailed] = useState(false)
+
+  useEffect(() => {
+    let alive = true
+
+    const load = async () => {
+      const [gitM, attentionM] = await Promise.all([
+        api.getMetric('git').catch(() => null),
+        api.getAttention().catch(() => null),
+      ])
+      if (!alive) return
+
+      if (!gitM && !attentionM) { setFailed(true); return }
+      setFailed(false)
+
+      const repos: any[] = gitM?.repos ?? []
+
+      const commits: CommitEntry[] = repos
+        .flatMap((r) => (r.commits ?? []).map((c: any) => ({
+          repo: r.name, hash: c.hash, message: c.message, date: c.date,
+        })))
+        // Newest first, across every repo — a commit made a minute ago in
+        // fsweb belongs above one from yesterday in senjoeru-synapse.
+        .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+        .slice(0, 5)
+
+      setData({
+        commits,
+        attentionItems: (attentionM?.items ?? []).slice(0, 5),
+        repoLinks: repos.map((r: any) => ({ name: r.name, path: r.path })),
+      })
+    }
+
+    load()
+    const t = setInterval(load, POLL_MS)
+    return () => { alive = false; clearInterval(t) }
+  }, [])
+
+  return { data, failed }
+}
+
+/** "4m ago" / "3h ago" / "2d ago". Never negative — a clock skew reads as "just now". */
+function timeAgo(iso: string | null | undefined): string {
+  if (!iso) return ''
+  const ms = Date.now() - new Date(iso).getTime()
+  if (!Number.isFinite(ms)) return ''
+  const minutes = Math.max(0, Math.floor(ms / 60_000))
+  if (minutes < 1) return 'just now'
+  if (minutes < 60) return `${minutes}m ago`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours}h ago`
+  return `${Math.floor(hours / 24)}d ago`
+}
+
+/**
+ * A one-line badge for finished work: Completed against Failed, from the same
+ * split the board tracks. Its own poll rather than riding
+ * `useWorkspaceSnapshot` — this renders in Assistant.tsx's centre column,
+ * which exists at every window width, not just Wide and Split.
+ */
+function useTaskSuccess(): { rate: number | null; completed: number; failed: number } | null {
+  const [data, setData] = useState<{ rate: number | null; completed: number; failed: number } | null>(null)
+
+  useEffect(() => {
+    let alive = true
+    const load = () => api.getMetric('tasks')
+      .then((m) => {
+        if (!alive) return
+        const tasks: any[] = m?.tasks ?? []
+        const completed = tasks.filter((t) => t.status === 'Completed').length
+        const taskFailed = tasks.filter((t) => t.status === 'Failed').length
+        const finished = completed + taskFailed
+        setData({
+          rate: finished > 0 ? Math.round((completed / finished) * 100) : null,
+          completed,
+          failed: taskFailed,
+        })
+      })
+      .catch(() => { if (alive) setData(null) })
+    load()
+    const t = setInterval(load, POLL_MS)
+    return () => { alive = false; clearInterval(t) }
+  }, [])
+
+  return data
 }
 
 /**
@@ -330,6 +525,305 @@ function Tile({ icon: Icon, label, value, tone = 'normal' }: {
 }
 
 /**
+ * Commits across every tracked repo, newest first — what actually landed,
+ * not what changed working-directory files (that's `RepoBranchStatus` on the
+ * other rail).
+ *
+ * Absent when there is nothing to show, same rule as every other rail tile:
+ * an empty "Recent commits" card is noise, not information.
+ */
+function RecentCommits({ commits }: { commits: CommitEntry[] }) {
+  if (commits.length === 0) return null
+  return (
+    <div className="glass rounded-xl px-2.5 py-2">
+      <div className="flex items-center gap-1.5 text-[9px] uppercase tracking-wider text-gray-500">
+        <GitCommit className="w-3 h-3 shrink-0" />Recent commits
+      </div>
+      <div className="mt-1.5 space-y-1.5">
+        {commits.map((c) => (
+          <div key={`${c.repo}:${c.hash}`}>
+            <div className="flex items-center gap-1 text-[9px] text-gray-500">
+              <span className="font-mono text-cyan-300/80 shrink-0">{c.hash}</span>
+              <span className="truncate">{c.repo}</span>
+              <span className="ml-auto shrink-0 font-mono text-gray-600">{timeAgo(c.date)}</span>
+            </div>
+            <p className="text-[10px] leading-snug text-gray-300 line-clamp-2">{c.message}</p>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/** Severity, as a dot — same colours as the rest of the HUD's warn/good tones. */
+const SEV_DOT: Record<AttentionItemLite['severity'], string> = {
+  high: 'bg-error',
+  medium: 'bg-amber-400',
+  low: 'bg-gray-500',
+}
+
+/**
+ * The top of the "needs you" queue — what `AttentionNotifier` would toast,
+ * read instead of waited for. See attention-service.js for what produces
+ * `failed` / `review` / `stalled` / `limit`.
+ */
+function AttentionList({ items }: { items: AttentionItemLite[] }) {
+  if (items.length === 0) return null
+  return (
+    <div className="glass rounded-xl px-2.5 py-2">
+      <div className="text-[9px] uppercase tracking-wider text-gray-500">Needs you</div>
+      <div className="mt-1.5 space-y-1.5">
+        {items.map((it) => (
+          <div key={it.id} className="flex items-start gap-1.5">
+            <span className={`mt-1 h-1.5 w-1.5 shrink-0 rounded-full ${SEV_DOT[it.severity] ?? SEV_DOT.low}`} />
+            <div className="min-w-0">
+              <p className="text-[10px] leading-snug text-gray-300 line-clamp-2">{it.title}</p>
+              <p className="truncate text-[9px] text-gray-600">{it.detail}</p>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Open a tracked repo's folder, or bring the main dashboard to the front.
+ *
+ * Gone entirely outside Electron — `openRepo`/`focusMainWindow` cross into the
+ * main process, and a browser build (`npm run dev:web`) has none to cross
+ * into. A button that cannot work is worse than no button.
+ */
+function QuickLinks({ repos }: { repos: RepoLink[] }) {
+  const canOpenRepo = !!window.electronAPI?.openRepo
+  const canFocusMain = !!window.electronAPI?.focusMainWindow
+  if (!canOpenRepo && !canFocusMain) return null
+
+  return (
+    <div className="glass rounded-xl px-2.5 py-2">
+      <div className="text-[9px] uppercase tracking-wider text-gray-500">Quick links</div>
+      <div className="mt-1.5 space-y-1">
+        {canFocusMain && (
+          <button
+            onClick={() => window.electronAPI?.focusMainWindow?.()}
+            className="flex w-full items-center gap-1.5 text-left text-[10px] text-gray-400 transition-colors hover:text-cyan-200"
+          >
+            <LayoutDashboard className="h-3 w-3 shrink-0" />
+            <span className="truncate">Dashboard</span>
+          </button>
+        )}
+        {canOpenRepo && repos.map((r) => (
+          <button
+            key={r.name}
+            onClick={() => window.electronAPI?.openRepo?.(r.path)}
+            title={r.path}
+            className="flex w-full items-center gap-1.5 text-left text-[10px] text-gray-400 transition-colors hover:text-cyan-200"
+          >
+            <FolderOpen className="h-3 w-3 shrink-0" />
+            <span className="truncate">{r.name}</span>
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Which tracked repos have work not yet committed, at a glance — the git
+ * metric's `ahead`/`behind`/`modified` the way a standup would say it, not the
+ * single "3 modified" total the Tile grid already carries elsewhere.
+ */
+function RepoBranchStatus({ repos }: { repos: RepoStatus[] }) {
+  if (repos.length === 0) return null
+  return (
+    <div className="glass rounded-xl px-2.5 py-2">
+      <div className="flex items-center gap-1.5 text-[9px] uppercase tracking-wider text-gray-500">
+        <GitBranch className="h-3 w-3 shrink-0" />Branches
+      </div>
+      <div className="mt-1.5 space-y-1">
+        {repos.map((r) => (
+          <div key={r.name} className="flex items-center justify-between gap-1.5 text-[10px]">
+            <span className="flex min-w-0 items-center gap-1.5">
+              <span
+                className={`h-1.5 w-1.5 shrink-0 rounded-full ${r.modified ? 'bg-amber-400' : 'bg-emerald-400'}`}
+                title={r.modified ? `${r.modified} file${r.modified === 1 ? '' : 's'} uncommitted` : 'clean'}
+              />
+              <span className="truncate text-gray-300">{r.name}</span>
+            </span>
+            <span className="shrink-0 font-mono text-gray-600">
+              {r.modified ? `${r.modified}m` : 'clean'}
+              {r.ahead > 0 && ` ↑${r.ahead}`}
+              {r.behind > 0 && ` ↓${r.behind}`}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/**
+ * The board's own status counts, said the way a standup would: what's moving,
+ * what's waiting, what landed, what didn't. The Wide rail's Tile grid already
+ * shows working/waiting as two of its four squares — this is the Split rail's
+ * equivalent, one compact card instead of four, because the Environment rail
+ * on the other side of Split is what took the room those tiles used to have.
+ */
+function StandupSummary({ working, waiting, done, failed }: {
+  working: number; waiting: number; done: number; failed: number
+}) {
+  return (
+    <div className="glass rounded-xl px-2.5 py-2">
+      <div className="text-[9px] uppercase tracking-wider text-gray-500">Standup</div>
+      <div className="mt-1.5 grid grid-cols-2 gap-x-2 gap-y-1 font-mono text-[10px] tabular-nums">
+        <div className="flex items-center justify-between">
+          <span className="text-gray-500 normal-case">working</span>
+          <span className="text-cyan-200">{working}</span>
+        </div>
+        <div className="flex items-center justify-between">
+          <span className="text-gray-500 normal-case">waiting</span>
+          <span className="text-gray-300">{waiting}</span>
+        </div>
+        <div className="flex items-center justify-between">
+          <span className="text-gray-500 normal-case">done</span>
+          <span className="text-emerald-300">{done}</span>
+        </div>
+        <div className="flex items-center justify-between">
+          <span className="text-gray-500 normal-case">failed</span>
+          <span className={failed ? 'text-red-300' : 'text-gray-600'}>{failed}</span>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Whether Joeru's own backend — the OpenCode server, not the host machine —
+ * is actually reachable. See `useJoeruHealth`.
+ */
+function BackendHealthTile() {
+  const health = useJoeruHealth()
+  if (!health) return null
+  return (
+    <div className="glass rounded-xl px-2.5 py-2 flex items-center gap-2">
+      {health.running
+        ? <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-400" />
+        : <XCircle className="h-3.5 w-3.5 shrink-0 text-red-400" />}
+      <div className="min-w-0">
+        <div className="text-[9px] uppercase tracking-wider text-gray-500">Joeru API</div>
+        <div className={`text-[10px] ${health.running ? 'text-emerald-300' : 'text-red-300'}`}>
+          {health.running ? 'online' : 'offline'}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Token distribution by project — shows which projects are consuming the most tokens.
+ * Hidden in presentation mode like other spend metrics.
+ */
+function TokenBreakdown({ projects, hidden: masked }: {
+  projects: Array<{ name: string; tokens: number }>;
+  hidden: boolean
+}) {
+  if (masked || projects.length === 0) {
+    return <div className="h-20 rounded bg-white/5" />
+  }
+
+  // Sort and take top 5 for readability
+  const topProjects = projects
+    .sort((a, b) => b.tokens - a.tokens)
+    .slice(0, 5)
+
+  const total = topProjects.reduce((sum, p) => sum + p.tokens, 0)
+
+  // Pie chart colors — reuse the HUD's palette
+  const colors = [
+    'rgb(34,211,238)',    // cyan-300
+    'rgb(99,102,241)',    // indigo-500
+    'rgb(168,85,247)',    // purple-500
+    'rgb(236,72,153)',    // pink-500
+    'rgb(249,115,22)',    // orange-500
+  ]
+
+  return (
+    <div className="glass rounded-xl px-2.5 py-2">
+      <div className="flex items-center justify-between text-[9px] uppercase tracking-wider text-gray-500">
+        <span>Token distribution</span>
+      </div>
+      <div className="mt-1.5 flex items-center gap-2">
+        {/* Pie chart */}
+        <div style={{ width: '60px', height: '60px' }}>
+          <ResponsiveContainer width="100%" height="100%">
+            <PieChart>
+              <Pie
+                data={topProjects}
+                dataKey="tokens"
+                cx="50%"
+                cy="50%"
+                innerRadius={15}
+                outerRadius={30}
+                paddingAngle={1}
+              >
+                {topProjects.map((_, index) => (
+                  <Cell key={`cell-${index}`} fill={colors[index % colors.length]} />
+                ))}
+              </Pie>
+            </PieChart>
+          </ResponsiveContainer>
+        </div>
+
+        {/* List of projects */}
+        <div className="min-w-0 flex-1 space-y-0.5">
+          {topProjects.map((p, i) => (
+            <div key={p.name} className="flex items-center justify-between text-[9px]">
+              <div className="flex items-center gap-1.5 min-w-0">
+                <span
+                  className="h-1.5 w-1.5 shrink-0 rounded-full"
+                  style={{ backgroundColor: colors[i % colors.length] }}
+                />
+                <span className="truncate text-gray-400">{p.name}</span>
+              </div>
+              <span className="shrink-0 font-mono text-gray-600 ml-1">
+                {Math.round((p.tokens / total) * 100)}%
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * A pill for the centre column: how much of finished work actually lands.
+ * Sits above the sphere, per the plan's "Success rate badge" — see
+ * `useTaskSuccess` for why it renders nothing until there is a finished task
+ * to measure.
+ */
+export function SuccessBadge() {
+  const data = useTaskSuccess()
+  if (!data || data.rate === null) return null
+
+  const tone = data.rate >= 90
+    ? 'text-emerald-300 border-emerald-400/25 bg-emerald-400/[0.07]'
+    : data.rate >= 70
+      ? 'text-amber-300 border-amber-400/25 bg-amber-400/[0.07]'
+      : 'text-red-300 border-red-400/25 bg-red-400/[0.07]'
+
+  return (
+    <div
+      className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-medium ${tone}`}
+      title={`${data.completed} completed, ${data.failed} failed`}
+    >
+      <Award className="h-3 w-3" />
+      {data.rate}% success
+    </div>
+  )
+}
+
+/**
  * The single most-active dispatch, one line, for the rail this window
  * actually has room for. Full multi-card detail (recent-action trail, per-
  * card indeterminate stripe) lives on Team.tsx's "Active Dispatches" — this
@@ -394,6 +888,7 @@ function DispatchTile() {
  */
 export function EnvironmentRail() {
   const health = useSystemHealth()
+  const { data: extras } = useEnvironmentExtras()
 
   return (
     <aside
@@ -401,6 +896,14 @@ export function EnvironmentRail() {
       className="w-[170px] shrink-0 overflow-y-auto p-3 space-y-2 border-r border-white/5"
     >
       <Clock />
+
+      {/*
+        Attention before commits: what needs a decision outranks what already
+        happened, same ordering AttentionNotifier uses for its own toasts.
+      */}
+      {extras && <AttentionList items={extras.attentionItems} />}
+      {extras && <RecentCommits commits={extras.commits} />}
+      {extras && <QuickLinks repos={extras.repoLinks} />}
 
       {health && (
         <div className="glass rounded-xl px-2.5 py-2">
@@ -482,6 +985,10 @@ export function WorkspaceStatusRail() {
         tone={snap.attention ? 'warn' : 'good'}
       />
 
+      <StandupSummary
+        working={snap.working} waiting={snap.waiting} done={snap.done} failed={snap.failed}
+      />
+
       <div className="glass rounded-xl px-2.5 py-2">
         <div className="flex items-center justify-between text-[9px] uppercase tracking-wider text-gray-500">
           <span className="flex items-center gap-1.5"><Coins className="w-3 h-3" />Tokens today</span>
@@ -492,6 +999,12 @@ export function WorkspaceStatusRail() {
         </div>
         <div className="mt-1.5"><Spark values={snap.trend} hidden={presenting} /></div>
       </div>
+
+      <TokenBreakdown projects={snap.projectBreakdown} hidden={presenting} />
+
+      <RepoBranchStatus repos={snap.repoStatus} />
+
+      <BackendHealthTile />
 
       <DispatchTile />
 
@@ -602,6 +1115,8 @@ export default function AssistantStats() {
           </div>
         </div>
       )}
+
+      <BackendHealthTile />
 
       {/*
         Real plan limits, above the queue because running out of window stops

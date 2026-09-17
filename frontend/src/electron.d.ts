@@ -76,6 +76,18 @@ export interface ElectronAPI {
   removeMetricsListener?: () => void
   openAssistant?: () => Promise<boolean>
   closeAssistant?: () => Promise<boolean>
+  /**
+   * Open a tracked repo's folder in the OS file explorer — the Environment
+   * rail's "Quick links". Absent in the browser build, where there is no
+   * main process to cross into.
+   */
+  openRepo?: (repoPath: string) => Promise<{ opened: boolean; error?: string | null }>
+  /**
+   * Bring the main dashboard window to the front, recreating it if it was
+   * closed. Assistant Mode is a separate frameless window with no navigation
+   * of its own, so "open the dashboard" has to ask the main process.
+   */
+  focusMainWindow?: () => Promise<boolean>
 
   /** Breadcrumb to the main process — survives a renderer crash. */
   trace?: (step: string) => void
