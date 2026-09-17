@@ -44,6 +44,14 @@ const HEALTH_MS = 5_000
 /** Below this the rail costs the conversation more room than it earns. */
 export const RAIL_MIN_WIDTH = 700
 
+/**
+ * Above this, the window has room for two rails either side of the
+ * conversation instead of one — the Environment rail (clock, host health)
+ * on the left and a trimmed Workspace status rail on the right, rather than
+ * the single combined `AssistantStats` rail Wide width shows.
+ */
+export const SPLIT_MIN_WIDTH = 1040
+
 /** Track the window width so the rail can appear and disappear with it. */
 export function useWideEnough(min = RAIL_MIN_WIDTH): boolean {
   const [wide, setWide] = useState(() => window.innerWidth >= min)
@@ -66,6 +74,84 @@ interface Snapshot {
   dirty: number
   /** Last seven days of token volume, for the sparkline. */
   trend: number[]
+}
+
+/**
+ * The workspace snapshot poll — tasks, attention, git, tokens.
+ *
+ * Extracted so the Split-width rails can share it rather than each mounting
+ * their own copy: the right rail (`WorkspaceStatusRail`) needs this and the
+ * left rail (`EnvironmentRail`) does not, so only the component that
+ * actually renders these numbers pays for fetching them.
+ */
+function useWorkspaceSnapshot(): { snap: Snapshot | null; failed: boolean } {
+  const [snap, setSnap] = useState<Snapshot | null>(null)
+  const [failed, setFailed] = useState(false)
+
+  useEffect(() => {
+    let alive = true
+
+    const load = async () => {
+      const [tasksM, attentionM, gitM, tokensM] = await Promise.all([
+        api.getMetric('tasks').catch(() => null),
+        api.getAttention().catch(() => null),
+        api.getMetric('git').catch(() => null),
+        api.getMetric('tokens').catch(() => null),
+      ])
+      if (!alive) return
+
+      // Every source failing means the backend is down, which is worth saying
+      // rather than rendering a rail of confident zeroes.
+      if (!tasksM && !attentionM && !tokensM && !gitM) { setFailed(true); return }
+      setFailed(false)
+
+      const tasks: any[] = tasksM?.tasks ?? []
+      const items: any[] = attentionM?.items ?? []
+      const repos: any[] = gitM?.repos ?? []
+
+      setSnap({
+        attention: items.length,
+        topAttention: items[0]?.title ?? null,
+        working: tasks.filter((t) => t.status === 'Working').length,
+        waiting: tasks.filter((t) => t.status === 'Pending' || t.status === 'Reviewing').length,
+        done: tasks.filter((t) => t.status === 'Completed').length,
+        tokens: Number(tokensM?.today ?? 0),
+        repos: repos.length,
+        dirty: repos.reduce((n, r) => n + (r.modified?.length ?? 0), 0),
+        trend: (tokensM?.daily ?? []).slice(-7).map((d: any) => Number(d.tokens ?? 0)),
+      })
+    }
+
+    load()
+    const t = setInterval(load, POLL_MS)
+    return () => { alive = false; clearInterval(t) }
+  }, [])
+
+  return { snap, failed }
+}
+
+/**
+ * Host health, polled on its own faster cadence (see `HEALTH_MS`).
+ *
+ * Extracted for the same reason as `useWorkspaceSnapshot`: at Split width
+ * this is rendered by `EnvironmentRail` alone, and the unchanged Wide rail
+ * below uses it too — one poll shared by whichever of the two is actually
+ * mounted, rather than each carrying its own copy of the same fetch effect.
+ */
+function useSystemHealth(): any | null {
+  const [health, setHealth] = useState<any | null>(null)
+
+  useEffect(() => {
+    let alive = true
+    const load = () => api.getSystemHealth()
+      .then((h) => { if (alive) setHealth(h) })
+      .catch(() => { if (alive) setHealth(null) })
+    load()
+    const t = setInterval(load, HEALTH_MS)
+    return () => { alive = false; clearInterval(t) }
+  }, [])
+
+  return health
 }
 
 /**
@@ -298,60 +384,126 @@ function DispatchTile() {
   )
 }
 
+/**
+ * Left rail at Split width (>=1040px) — "Environment": the clock and the
+ * host's own health, nothing that comes from the workspace API.
+ *
+ * A separate component (not a slice of `AssistantStats`' JSX) so it can call
+ * `useSystemHealth()` on its own and skip the workspace snapshot poll
+ * entirely — that data belongs to `WorkspaceStatusRail` on the other side.
+ */
+export function EnvironmentRail() {
+  const health = useSystemHealth()
+
+  return (
+    <aside
+      aria-label="Environment"
+      className="w-[170px] shrink-0 overflow-y-auto p-3 space-y-2 border-r border-white/5"
+    >
+      <Clock />
+
+      {health && (
+        <div className="glass rounded-xl px-2.5 py-2">
+          <div className="text-[9px] uppercase tracking-wider text-gray-500">System</div>
+          <div className="mt-1.5 flex items-start justify-around">
+            <Gauge value={health.cpu?.usagePercent ?? null} label="cpu" />
+            <Gauge value={Number(health.memory?.usagePercent ?? 0)} label="mem" />
+          </div>
+          <div className="mt-1.5 space-y-0.5 font-mono text-[9px] text-gray-600">
+            <div className="flex justify-between">
+              <span>up</span>
+              <span className="text-gray-500">{uptimeLabel(health.uptime ?? 0)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span>ram</span>
+              <span className="text-gray-500">
+                {formatBytes(health.memory?.used ?? 0)} / {formatBytes(health.memory?.total ?? 0)}
+              </span>
+            </div>
+            {health.claude?.exists && (
+              <div className="flex justify-between">
+                <span>.claude</span>
+                <span className="text-gray-500">{formatBytes(health.claude.size ?? 0)}</span>
+              </div>
+            )}
+            <div className="flex justify-between">
+              <span>cores</span>
+              <span className="text-gray-500">{health.cpu?.cores ?? '?'}</span>
+            </div>
+          </div>
+        </div>
+      )}
+    </aside>
+  )
+}
+
+/**
+ * Right rail at Split width (>=1040px) — "Workspace status": a subset of the
+ * Wide rail's tiles, not a duplicate of it. Attention, today's tokens, the
+ * one dispatch worth watching, and plan limits — the numbers Joel actually
+ * acts on. The per-status task counts, "top of the queue" and the repo/done
+ * footer stay Wide-rail-only; the Environment rail alongside this one is
+ * what used the room instead.
+ */
+export function WorkspaceStatusRail() {
+  const { snap, failed } = useWorkspaceSnapshot()
+  const presenting = usePresentationMode()
+
+  if (failed) {
+    return (
+      <aside
+        aria-label="Workspace status"
+        className="w-[190px] shrink-0 p-3 text-[11px] text-gray-500 border-l border-white/5"
+      >
+        Metrics unavailable — is the backend running?
+      </aside>
+    )
+  }
+
+  if (!snap) {
+    return (
+      <aside
+        aria-label="Workspace status"
+        className="w-[190px] shrink-0 flex items-center justify-center border-l border-white/5"
+      >
+        <Loader2 className="w-4 h-4 text-gray-600 animate-spin" />
+      </aside>
+    )
+  }
+
+  return (
+    <aside
+      aria-label="Workspace status"
+      className="w-[190px] shrink-0 overflow-y-auto p-3 space-y-2 border-l border-white/5"
+    >
+      <Tile
+        icon={AlertTriangle} label="Attention"
+        value={String(snap.attention)}
+        tone={snap.attention ? 'warn' : 'good'}
+      />
+
+      <div className="glass rounded-xl px-2.5 py-2">
+        <div className="flex items-center justify-between text-[9px] uppercase tracking-wider text-gray-500">
+          <span className="flex items-center gap-1.5"><Coins className="w-3 h-3" />Tokens today</span>
+          {presenting && <span className="text-amber-300/80 normal-case tracking-normal">hidden</span>}
+        </div>
+        <div className="mt-0.5 font-mono text-base leading-none tabular-nums text-cyan-200">
+          {presenting ? '····' : count(snap.tokens)}
+        </div>
+        <div className="mt-1.5"><Spark values={snap.trend} hidden={presenting} /></div>
+      </div>
+
+      <DispatchTile />
+
+      <UsageLimits compact />
+    </aside>
+  )
+}
+
 export default function AssistantStats() {
   const presenting = usePresentationMode()
-  const [snap, setSnap] = useState<Snapshot | null>(null)
-  const [failed, setFailed] = useState(false)
-  const [health, setHealth] = useState<any | null>(null)
-
-  useEffect(() => {
-    let alive = true
-
-    const load = async () => {
-      const [tasksM, attentionM, gitM, tokensM] = await Promise.all([
-        api.getMetric('tasks').catch(() => null),
-        api.getAttention().catch(() => null),
-        api.getMetric('git').catch(() => null),
-        api.getMetric('tokens').catch(() => null),
-      ])
-      if (!alive) return
-
-      // Every source failing means the backend is down, which is worth saying
-      // rather than rendering a rail of confident zeroes.
-      if (!tasksM && !attentionM && !tokensM && !gitM) { setFailed(true); return }
-      setFailed(false)
-
-      const tasks: any[] = tasksM?.tasks ?? []
-      const items: any[] = attentionM?.items ?? []
-      const repos: any[] = gitM?.repos ?? []
-
-      setSnap({
-        attention: items.length,
-        topAttention: items[0]?.title ?? null,
-        working: tasks.filter((t) => t.status === 'Working').length,
-        waiting: tasks.filter((t) => t.status === 'Pending' || t.status === 'Reviewing').length,
-        done: tasks.filter((t) => t.status === 'Completed').length,
-        tokens: Number(tokensM?.today ?? 0),
-        repos: repos.length,
-        dirty: repos.reduce((n, r) => n + (r.modified?.length ?? 0), 0),
-        trend: (tokensM?.daily ?? []).slice(-7).map((d: any) => Number(d.tokens ?? 0)),
-      })
-    }
-
-    load()
-    const t = setInterval(load, POLL_MS)
-    return () => { alive = false; clearInterval(t) }
-  }, [])
-
-  useEffect(() => {
-    let alive = true
-    const load = () => api.getSystemHealth()
-      .then((h) => { if (alive) setHealth(h) })
-      .catch(() => { if (alive) setHealth(null) })
-    load()
-    const t = setInterval(load, HEALTH_MS)
-    return () => { alive = false; clearInterval(t) }
-  }, [])
+  const { snap, failed } = useWorkspaceSnapshot()
+  const health = useSystemHealth()
 
   if (failed) {
     return (
