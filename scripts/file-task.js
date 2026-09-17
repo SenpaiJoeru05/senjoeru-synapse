@@ -55,6 +55,18 @@ function boardPath() {
 
 function main() {
   const args = parseArgs(process.argv.slice(2));
+
+  // Same rule as set-task-status.js: an agent does not get to declare work
+  // done. Filing a task that is already Completed is the obvious way around
+  // that, so it is closed here rather than left as the gap.
+  if (args.status === 'Completed') {
+    console.error(
+      'refused: a task cannot be filed as already Completed.\n'
+      + 'File it, do the work, then set Reviewing and hand it back to Joel.',
+    );
+    process.exit(1);
+  }
+
   if (!args.title) {
     console.error('usage: node scripts/file-task.js --title "..." [--agent slug] '
       + '[--repos a,b] [--priority Low|Medium|High] [--status Pending|Working|Reviewing|Completed|Failed] '

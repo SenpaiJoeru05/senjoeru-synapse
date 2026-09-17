@@ -7,6 +7,7 @@ import { api } from '@/lib/api'
 import UsageLimits from '@/components/UsageLimits'
 import { usePresentationMode } from '@/lib/presentation'
 import { useRealtime, useTasks } from '@/lib/realtime'
+import { sortTasks } from '@/lib/task-order'
 import { repoBadge } from '@/lib/repo-color'
 import { formatBytes, formatNumber } from '@/lib/utils'
 import {
@@ -26,9 +27,6 @@ interface SystemHealth {
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
-const STATUS_SORT: Record<string, number> = {
-  working: 0, reviewing: 1, pending: 2, completed: 3, failed: 4,
-}
 const STATUS_BAR: Record<string, string> = {
   working:   'bg-primary',
   reviewing: 'bg-secondary',
@@ -199,13 +197,8 @@ export default function Overview() {
     return h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening'
   }
 
-  // Sort: Working → Reviewing → Pending → Completed → Failed, then most recent first
-  const sortedTasks = [...allTasks].sort((a, b) => {
-    const sa = STATUS_SORT[a.status?.toLowerCase() ?? ''] ?? 99
-    const sb = STATUS_SORT[b.status?.toLowerCase() ?? ''] ?? 99
-    if (sa !== sb) return sa - sb
-    return new Date(b.lastUpdated ?? 0).getTime() - new Date(a.lastUpdated ?? 0).getTime()
-  })
+  // Needs-you first, then most recent — see lib/task-order for why.
+  const sortedTasks = sortTasks(allTasks)
 
   const activeTasks    = allTasks.filter(t => ['working','reviewing','in progress'].includes(t.status?.toLowerCase() ?? '')).length
   const completedTasks = allTasks.filter(t => ['completed','done'].includes(t.status?.toLowerCase() ?? '')).length

@@ -330,13 +330,19 @@ const PR_TOOLS = [
 const TEAM_TOOLS = ['Task', 'TodoWrite', 'WebSearch', 'WebFetch'];
 
 /**
- * Filing a task, as one narrow command rather than a hand-edited JSON file.
+ * Writing to the board, as two narrow commands rather than a hand-edited file.
  *
- * Scoped to this exact script, not `Bash(node:*)` — that would be arbitrary
- * code execution for the sake of one operation. The script itself can only
- * append a task; it cannot edit or delete one.
+ * Scoped to these exact scripts, not `Bash(node:*)` — that would be arbitrary
+ * code execution for the sake of two operations. Between them they can append
+ * a task and move its status; neither can delete one, and neither can mark
+ * anything Completed. That last part is the point: Joel reviews before Done,
+ * and a rule the board enforces cannot be forgotten halfway through a task
+ * the way a line in AGENTS.md has been three times.
  */
-const BOARD_TOOLS = ['Bash(node scripts/file-task.js:*)'];
+const BOARD_TOOLS = [
+  'Bash(node scripts/file-task.js:*)',
+  'Bash(node scripts/set-task-status.js:*)',
+];
 
 /** Everything the CLI may use here — and everything a subagent inherits. */
 const GRANTED_TOOLS = [
@@ -384,12 +390,16 @@ const CAPABILITY_NOTE = [
   'spawn inherits exactly this tool list, so they can verify too.',
   'Research: WebSearch and WebFetch are available for anything your training',
   'would be stale on.',
-  'The task board: to file a NEW task run',
-  '`node scripts/file-task.js --title "..." --agent <slug> --repos <a,b>`.',
-  'Do not hand-edit tasks.json to add one and do not work out the next id',
-  'yourself — the script assigns it, which is the whole reason it exists.',
-  'Report the id it prints, not one you expected. Status changes on an',
-  'existing task are still a normal edit.',
+  'The task board: file a NEW task with',
+  '`node scripts/file-task.js --title "..." --agent <slug> --repos <a,b>`,',
+  'and change a status with',
+  '`node scripts/set-task-status.js --id <id> --status <status>`.',
+  'Never hand-edit tasks.json, and never work out the next id yourself — the',
+  'script assigns it. Report the id it prints, not one you expected.',
+  'You may NOT mark a task Completed; the script refuses it. When work is',
+  'ready, set Reviewing and hand it back to Joel with what changed and how to',
+  'test it. He marks it Done after he has reviewed it. Do not describe work as',
+  'done, finished or complete when you mean ready for review.',
   'One rule about all of it: never report work you did not do. Do not say you',
   'routed, assigned or handed something off unless you actually called Task,',
   'and never report a specialist as finished unless one really ran and',
