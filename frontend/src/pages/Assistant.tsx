@@ -1254,15 +1254,35 @@ export default function Assistant() {
               onChange={(e) => { if (e.target.value) openSession(e.target.value) }}
               disabled={busy || loadingSession}
               title="Open a previous conversation"
-              style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-              className="glass rounded-lg text-[11px] text-gray-400 px-2 py-1 ml-2 max-w-[180px]
-                         focus:outline-none focus:border-cyan-400/40 disabled:opacity-40"
+              style={{
+                WebkitAppRegion: 'no-drag',
+                backgroundColor: 'rgba(0, 0, 0, 0.3)',
+                color: '#e5e7eb',
+              } as React.CSSProperties}
+              className="rounded-lg text-[11px] px-2 py-1.5 ml-2 max-w-[200px]
+                         bg-black/30 border border-cyan-400/20 hover:border-cyan-400/40
+                         focus:outline-none focus:border-cyan-400/60 focus:ring-1 focus:ring-cyan-400/30
+                         disabled:opacity-40 disabled:hover:border-cyan-400/20
+                         transition-all cursor-pointer"
             >
-              <option value="">{loadingSession ? 'Opening…' : 'Past conversations'}</option>
+              <option value="" style={{
+                backgroundColor: 'rgba(15, 23, 42, 0.95)',
+                color: '#e5e7eb',
+                padding: '0.5rem',
+              }}>
+                {loadingSession ? 'Opening…' : 'Select session'}
+              </option>
               {sessions.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {/* Titles read "Assistant Mode — Sep 14, 9:41 AM"; the prefix
-                      is the same on every row and only costs width here. */}
+                <option
+                  key={s.id}
+                  value={s.id}
+                  style={{
+                    backgroundColor: 'rgba(15, 23, 42, 0.95)',
+                    color: '#e5e7eb',
+                    padding: '0.5rem',
+                    borderBottom: '1px solid rgba(200, 200, 200, 0.1)',
+                  }}
+                >
                   {s.title?.replace(/^Assistant Mode\s*[—-]\s*/, '') || 'Untitled'}
                 </option>
               ))}
