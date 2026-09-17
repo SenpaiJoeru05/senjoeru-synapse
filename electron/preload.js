@@ -8,6 +8,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // offering a button that cannot work.
   openAssistant: () => ipcRenderer.invoke('open-assistant'),
   closeAssistant: () => ipcRenderer.invoke('close-assistant'),
+  // Assistant Mode's Environment rail "Quick links" — cross into the main
+  // process because the renderer has no filesystem access and the main
+  // dashboard is a separate BrowserWindow this one shares no Router with.
+  openRepo: (repoPath) => ipcRenderer.invoke('open-repo', repoPath),
+  focusMainWindow: () => ipcRenderer.invoke('focus-main-window'),
 
   // Voice. Both ends run in the main process — neural TTS via Piper and
   // recognition via Windows System.Speech — so the renderer only plays audio

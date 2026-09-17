@@ -39,8 +39,8 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i += 1) {
     if (!argv[i].startsWith('--')) continue;
     const name = argv[i].slice(2);
-    if (!['id', 'status'].includes(name)) {
-      throw new Error(`unknown flag --${name} — expected --id or --status`);
+    if (!['id', 'status', 'progress'].includes(name)) {
+      throw new Error(`unknown flag --${name} — expected --id, --status, or --progress`);
     }
     const value = argv[i + 1];
     if (value === undefined || value.startsWith('--')) throw new Error(`--${name} needs a value`);
@@ -58,7 +58,7 @@ function boardPath() {
 function main() {
   const args = parseArgs(process.argv.slice(2));
   if (!args.id || !args.status) {
-    console.error(`usage: node scripts/set-task-status.js --id <id> --status <${STATUSES.filter((s) => s !== RESERVED).join('|')}>`);
+    console.error(`usage: node scripts/set-task-status.js --id <id> --status <${STATUSES.filter((s) => s !== RESERVED).join('|')}> [--progress <0-100>]`);
     process.exit(2);
   }
 
@@ -71,8 +71,13 @@ function main() {
     process.exit(1);
   }
 
-  const { task, previous } = setTaskStatus(boardPath(), args.id, args.status);
-  console.log(`Task ${task.id}: ${previous} -> ${task.status}`);
+  const progress = args.progress ? Number(args.progress) : null;
+  if (progress !== null && (!Number.isFinite(progress) || progress < 0 || progress > 100)) {
+    throw new Error('progress must be a number between 0 and 100');
+  }
+
+  const { task, previous } = setTaskStatus(boardPath(), args.id, args.status, progress);
+  console.log(`Task ${task.id}: ${previous} -> ${task.status} (${task.progress}%)`);
   console.log(task.title);
   if (task.status === 'Reviewing') {
     console.log('\nIt is at the top of the board now. Tell Joel what to review.');
