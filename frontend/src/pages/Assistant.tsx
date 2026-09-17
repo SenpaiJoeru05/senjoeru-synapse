@@ -12,6 +12,7 @@
  * to Joeru, which is slower and spends tokens — and the UI says which happened.
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
 import {
   Bot, Send, Volume2, VolumeX, X, Loader2, Zap, Cloud, Mic, Sparkles, Terminal,
   ChevronDown, ChevronUp,
@@ -21,7 +22,9 @@ import { answerLocally, classify, type Answer } from '../lib/assistant-intents'
 import { api } from '../lib/api'
 import VoiceOrb from '../components/VoiceOrb'
 import Markdown from '../components/Markdown'
-import AssistantStats, { useWideEnough } from '../components/AssistantStats'
+import AssistantStats, {
+  EnvironmentRail, WorkspaceStatusRail, SPLIT_MIN_WIDTH, useWideEnough,
+} from '../components/AssistantStats'
 import { useAgentActivity } from '../lib/useAgentActivity'
 import { toolIcon } from '../lib/tool-icons'
 import { displayAgentName, sortDispatches } from '../lib/agent-display'
@@ -401,8 +404,18 @@ export default function Assistant() {
   >(null)
   const sessionRef = useRef<string | null>(null)
   const busy = phase !== 'idle'
-  // Drives whether the stats rail has room to render.
+  // Drives whether the stats rail has room to render at all.
   const wide = useWideEnough()
+  /**
+   * Drives whether that rail splits into two — Environment on the left,
+   * a trimmed Workspace status on the right — instead of the single
+   * combined `AssistantStats` column Wide width shows.
+   */
+  const split = useWideEnough(SPLIT_MIN_WIDTH)
+  // A rail that fades and widens in over 180ms is a nicety, not a signal —
+  // someone who has asked Windows/macOS for reduced motion gets it instantly.
+  const reduceMotion = useReducedMotion()
+  const railTransition = { duration: reduceMotion ? 0 : 0.18, ease: 'easeOut' as const }
 
   useEffect(() => { mutedRef.current = muted }, [muted])
 
@@ -1494,10 +1507,17 @@ export default function Assistant() {
       <div
         ref={scrollRef}
         className={`shrink-0 overflow-y-auto px-4 border-t border-white/5 bg-black/20
-                    ${showLog ? 'max-h-[50vh] py-3 space-y-3' : 'max-h-0 py-0'}`}
+                    ${showLog ? 'max-h-[50vh] py-3' : 'max-h-0 py-0'}`}
         style={{ transition: 'max-height 180ms ease-out' }}
         aria-hidden={!showLog}
       >
+      {/*
+        Capped and centred, or a wide/split window stretches every question
+        and answer full-bleed edge to edge — readable as a HUD number, not as
+        a sentence. `ch` rather than a pixel value so the cap tracks the
+        text's own size instead of an arbitrary width picked for one font.
+      */}
+      <div className="mx-auto w-full max-w-[46ch] space-y-3">
         {turns.length === 0 && (
           <div className="text-sm text-gray-500 space-y-2">
             <p>Ask about the current state of work. These are answered locally —
@@ -1588,6 +1608,7 @@ export default function Assistant() {
           </div>
         ))}
       </div>
+      </div>
 
       <div className="shrink-0 border-t border-white/5">
 
@@ -1631,12 +1652,63 @@ export default function Assistant() {
     </div>
 
     {/*
-      The stats rail, only when there is room for it. At the default 440px a
-      stats column would leave the conversation about 250px, which is worse
-      than showing no stats at all — so widen the window and it appears. The
-      window remembers its size now, so that is a one-time gesture.
+      Environment rail — Split width only (>=1040px). A sibling AFTER the
+      centre column in the DOM even though it renders on the LEFT: a screen
+      reader reaches the conversation first regardless of window width, and
+      `order-first` is what actually moves it there visually. Reordering the
+      DOM itself would flip that for every assistive-tech user the instant
+      the window crossed 1040px.
     */}
-    {wide && <AssistantStats />}
+    <AnimatePresence>
+      {split && (
+        <motion.div
+          key="environment-rail"
+          className="order-first overflow-hidden shrink-0"
+          initial={{ opacity: 0, width: 0 }}
+          animate={{ opacity: 1, width: 170 }}
+          exit={{ opacity: 0, width: 0 }}
+          transition={railTransition}
+        >
+          <EnvironmentRail />
+        </motion.div>
+      )}
+    </AnimatePresence>
+
+    {/*
+      The right-hand rail. Below 700px there is no room for either; from
+      700-1039px it is the full combined `AssistantStats`; at 1040px and up
+      it swaps for the trimmed `WorkspaceStatusRail`, freeing the room the
+      Environment rail above just took on the other side. Widening or
+      narrowing the window is a real gesture with a real result rather than a
+      setting to find, so each swap fades and widens in rather than popping —
+      same idea as the drawer's own `max-height 180ms ease-out`.
+    */}
+    <AnimatePresence>
+      {wide && !split && (
+        <motion.div
+          key="wide-rail"
+          className="overflow-hidden shrink-0"
+          initial={{ opacity: 0, width: 0 }}
+          animate={{ opacity: 1, width: 190 }}
+          exit={{ opacity: 0, width: 0 }}
+          transition={railTransition}
+        >
+          <AssistantStats />
+        </motion.div>
+      )}
+      {split && (
+        <motion.div
+          key="workspace-status-rail"
+          className="overflow-hidden shrink-0"
+          initial={{ opacity: 0, width: 0 }}
+          animate={{ opacity: 1, width: 190 }}
+          exit={{ opacity: 0, width: 0 }}
+          transition={railTransition}
+        >
+          <WorkspaceStatusRail />
+        </motion.div>
+      )}
+    </AnimatePresence>
     </div>
   )
 }

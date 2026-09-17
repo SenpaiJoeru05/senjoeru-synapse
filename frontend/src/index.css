@@ -87,3 +87,30 @@
   50%  { transform: translateX(150%) }
   100% { transform: translateX(-100%) }
 }
+
+/*
+ * prefers-reduced-motion, applied globally rather than per component.
+ *
+ * Most of the motion this app has — the Gauge dial's stroke-dasharray sweep,
+ * the usage-limit bars, the conversation drawer's max-height, the caption
+ * fade — is an inline `style={{ transition: ... }}`, not a class, so there is
+ * no single selector to swap out per widget. An `!important` override at the
+ * universal selector still wins here: CSS resolves importance before
+ * specificity, so an author `!important` rule beats a same-origin inline
+ * declaration that has none, whatever the element's own style attribute says.
+ * That is the one exception that makes a rule this blunt actually work.
+ *
+ * `framer-motion`'s own transitions (the rail slide-ins) are excluded from
+ * needing this — Assistant.tsx reads `useReducedMotion()` itself and sets
+ * their duration to 0 directly, since forcing a near-zero *duration* still
+ * lets Motion run a full width/opacity keyframe in a single frame, where
+ * disabling it at the source is the honest fix.
+ */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
