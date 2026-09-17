@@ -196,8 +196,11 @@ export const api = {
   async joeruCreateSession(title?: string): Promise<any> {
     return (await axios.post(`${API_BASE_URL}/joeru/sessions`, { title })).data
   },
-  async joeruMessages(sessionId: string): Promise<any> {
-    return (await axios.get(`${API_BASE_URL}/joeru/sessions/${encodeURIComponent(sessionId)}/messages`)).data
+  async joeruMessages(sessionId: string, limit?: number): Promise<any> {
+    const url = limit
+      ? `${API_BASE_URL}/joeru/sessions/${encodeURIComponent(sessionId)}/messages?limit=${limit}`
+      : `${API_BASE_URL}/joeru/sessions/${encodeURIComponent(sessionId)}/messages`
+    return (await axios.get(url)).data
   },
   async joeruAbort(sessionId: string): Promise<any> {
     return (await axios.post(`${API_BASE_URL}/joeru/sessions/${encodeURIComponent(sessionId)}/abort`)).data

@@ -347,12 +347,15 @@ export default function JoeruChat() {
     if (cli) {
       try {
         const rows = await cli()
-        setSessions((rows || []).map((r) => ({
-          id: r.id,
-          title: r.title,
-          time: { updated: r.updated },
-          runner: 'claude' as const,
-        })))
+        // Exclude Assistant Mode sessions from Chat
+        setSessions((rows || [])
+          .filter((r: any) => !r.title?.startsWith('Assistant Mode'))
+          .map((r) => ({
+            id: r.id,
+            title: r.title,
+            time: { updated: r.updated },
+            runner: 'claude' as const,
+          })))
         return
       } catch { /* fall through to OpenCode rather than showing nothing */ }
     }
@@ -360,10 +363,12 @@ export default function JoeruChat() {
     try {
       const { sessions: all } = await api.joeruSessions()
       // Root sessions only — subagent runs are steps inside a conversation,
-      // not conversations you'd pick up again.
+      // not conversations you'd pick up again. Also exclude Assistant Mode
+      // sessions, which are separate voice conversations and should not appear
+      // in the Chat list.
       setSessions(
         (all || [])
-          .filter((s: any) => !s.parentID)
+          .filter((s: any) => !s.parentID && !s.title?.startsWith('Assistant Mode'))
           .sort((a: any, b: any) => (b.time?.updated || 0) - (a.time?.updated || 0))
           .map((s: any) => ({ ...s, runner: 'opencode' as const })),
       )
@@ -531,14 +536,15 @@ export default function JoeruChat() {
   }, [sending])
 
   // Poll the reply as it's built. Only the newest assistant message matters —
-  // anything earlier is already rendered in `turns`.
+  // anything earlier is already rendered in `turns`. Fetch only the last few
+  // messages to avoid downloading the full history every second.
   useEffect(() => {
     if (!sending || !sessionId) return
     let cancelled = false
 
     const tick = async () => {
       try {
-        const { messages } = await api.joeruMessages(sessionId)
+        const { messages } = await api.joeruMessages(sessionId, 5)
         if (cancelled) return
         const last = [...(messages || [])].reverse()
           .find((m: any) => m?.info?.role === 'assistant')
